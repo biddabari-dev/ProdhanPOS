@@ -2,1758 +2,2485 @@
 
 namespace App\Http\Controllers;
 
+use App\Brands;
+use App\Business;
+use App\BusinessLocation;
+use App\Category;
+use App\Exports\ProductsExport;
+use App\Media;
+use App\Product;
+use App\ProductVariation;
+use App\PurchaseLine;
+use App\SellingPriceGroup;
+use App\TaxRate;
+use App\Unit;
+use App\Utils\ModuleUtil;
+use App\Utils\ProductUtil;
+use App\Variation;
+use App\VariationGroupPrice;
+use App\VariationLocationDetails;
+use App\VariationTemplate;
+use App\Warranty;
+use Excel;
 use Illuminate\Http\Request;
-use Illuminate\Support\Str;
-use Keygen\Keygen;
-use App\Models\Brand;
-use App\Models\Category;
-use App\Models\Unit;
-use App\Models\Tax;
-use App\Models\Warehouse;
-use App\Models\Supplier;
-use App\Models\Product;
-use App\Models\ProductBatch;
-use App\Models\Product_Warehouse;
-use App\Models\Product_Supplier;
-use App\Models\CustomField;
-use Auth;
-use DNS1D;
-use Spatie\Permission\Models\Role;
-use Spatie\Permission\Models\Permission;
-use Illuminate\Validation\Rule;
-use DB;
-use App\Models\Variant;
-use App\Models\ProductVariant;
-use App\Models\Barcode;
-use App\Models\Purchase;
-use App\Models\ProductPurchase;
-use App\Models\Payment;
-use App\Traits\TenantInfo;
-use App\Traits\CacheForget;
-use Intervention\Image\ImageManager;
-use Intervention\Image\Drivers\Gd\Driver;
-use File;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Yajra\DataTables\Facades\DataTables;
+use App\Events\ProductsCreatedOrModified;
+use App\TransactionSellLine;
 
 class ProductController extends Controller
 {
-    use CacheForget;
-    use TenantInfo;
+    /**
+     * All Utils instance.
+     */
+    protected $productUtil;
 
-    public function index(Request $request)
+    protected $moduleUtil;
+
+    private $barcode_types;
+
+    /**
+     * Constructor
+     *
+     * @param  ProductUtils  $product
+     * @return void
+     */
+    public function __construct(ProductUtil $productUtil, ModuleUtil $moduleUtil)
     {
-        $role = Role::find(Auth::user()->role_id);
-        if($role->hasPermissionTo('products-index')){
-            $lims_warehouse_list = Warehouse::where('is_active', true)->get();
+        $this->productUtil = $productUtil;
+        $this->moduleUtil = $moduleUtil;
 
-            if($request->input('warehouse_id'))
-                $warehouse_id = $request->input('warehouse_id');
-            else
-                $warehouse_id = 0;
-
-            $permissions = Role::findByName($role->name)->permissions;
-
-            foreach ($permissions as $permission)
-                $all_permission[] = $permission->name;
-            if(empty($all_permission))
-                $all_permission[] = 'dummy text';
-            $role_id = $role->id;
-            $numberOfProduct = DB::table('products')->where('is_active', true)->count();
-            $custom_fields = CustomField::where([
-                                ['belongs_to', 'product'],
-                                ['is_table', true]
-                            ])->pluck('name');
-            $field_name = [];
-            foreach($custom_fields as $fieldName) {
-                $field_name[] = str_replace(" ", "_", strtolower($fieldName));
-            }
-            return view('backend.product.index', compact('warehouse_id','all_permission', 'role_id', 'numberOfProduct', 'custom_fields', 'field_name','lims_warehouse_list'));
-        }
-        else
-            return redirect()->back()->with('not_permitted', 'Sorry! You are not allowed to access this module');
+        //barcode types
+        $this->barcode_types = $this->productUtil->barcode_types();
     }
 
-    public function productData(Request $request)
+    /**
+     * Display a listing of the resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function index()
     {
-        $columns = array(
-            2 => 'name',
-            3 => 'code',
-            4 => 'brand_id',
-            5 => 'category_id',
-            6 => 'qty',
-            7 => 'unit_id',
-            8 => 'price',
-            9 => 'cost',
-            10 => 'stock_worth'
-        );
-
-        $warehouse_id = $request->input('warehouse_id');
-
-        $totalData = DB::table('products')->where('is_active', true)->count();
-        $totalFiltered = $totalData;
-
-        if($request->input('length') != -1)
-            $limit = $request->input('length');
-        else
-            $limit = $totalData;
-        $start = $request->input('start');
-        $order = 'products.'.$columns[$request->input('order.0.column')];
-        $dir = $request->input('order.0.dir');
-        //fetching custom fields data
-        $custom_fields = CustomField::where([
-                        ['belongs_to', 'product'],
-                        ['is_table', true]
-                    ])->pluck('name');
-        $field_names = [];
-        foreach($custom_fields as $fieldName) {
-            $field_names[] = str_replace(" ", "_", strtolower($fieldName));
+        if (! auth()->user()->can('product.view') && ! auth()->user()->can('product.create')) {
+            abort(403, 'Unauthorized action.');
         }
-        if(empty($request->input('search.value'))){
-            $products = Product::with('category', 'brand', 'unit')->offset($start)
-                        ->where('is_active', true)
-                        ->limit($limit)
-                        ->orderBy($order,$dir)
-                        ->get();
-        }
-        else
-        {
-            $search = $request->input('search.value');
-            $q = Product::select('products.*')
-                ->with('category', 'brand', 'unit')
-                ->join('categories', 'products.category_id', '=', 'categories.id')
-                ->leftjoin('product_purchases','product_purchases.product_id','=', 'products.id')
-                ->leftjoin('brands', 'products.brand_id', '=', 'brands.id')
-                ->leftjoin('product_variants', 'products.id', '=', 'product_variants.product_id')
-                ->where([
-                    ['products.name', 'LIKE', "%{$search}%"],
-                    ['products.is_active', true]
-                ])
-                ->orWhere([
-                    ['products.code', 'LIKE', "%{$search}%"],
-                    ['products.is_active', true]
-                ])
-                ->orWhere([
-                    ['product_variants.item_code', 'LIKE', "%{$search}%"],
-                    ['products.is_active', true]
-                ])
-                ->orWhere([
-                    ['categories.name', 'LIKE', "%{$search}%"],
-                    ['categories.is_active', true],
-                    ['products.is_active', true]
-                ])
-                ->orWhere([
-                    ['brands.title', 'LIKE', "%{$search}%"],
-                    ['brands.is_active', true],
-                    ['products.is_active', true]
-                ])
-                ->orWhere([
-                    ['product_purchases.imei_number', 'LIKE', "%{$search}%"],
-                    ['products.is_active', true]
-                ]);
-            //searching with custom field
-            foreach ($field_names as $key => $field_name) {
-                $q = $q->orwhere('products.' . $field_name, 'LIKE', "%{$search}%");
+        $business_id = request()->session()->get('user.business_id');
+        $selling_price_group_count = SellingPriceGroup::countSellingPriceGroups($business_id);
+        $is_woocommerce = $this->moduleUtil->isModuleInstalled('Woocommerce');
+
+        if (request()->ajax()) {
+            //Filter by location
+            $location_id = request()->get('location_id', null);
+            $permitted_locations = auth()->user()->permitted_locations();
+
+            $query = Product::with(['media'])
+                ->leftJoin('brands', 'products.brand_id', '=', 'brands.id')
+                ->join('units', 'products.unit_id', '=', 'units.id')
+                ->leftJoin('categories as c1', 'products.category_id', '=', 'c1.id')
+                ->leftJoin('categories as c2', 'products.sub_category_id', '=', 'c2.id')
+                ->leftJoin('tax_rates', 'products.tax', '=', 'tax_rates.id')
+                ->join('variations as v', 'v.product_id', '=', 'products.id')
+                ->leftJoin('variation_location_details as vld', function ($join) use ($permitted_locations) {
+                    $join->on('vld.variation_id', '=', 'v.id');
+                    if ($permitted_locations != 'all') {
+                        $join->whereIn('vld.location_id', $permitted_locations);
+                    }
+                })
+                ->whereNull('v.deleted_at')
+                ->where('products.business_id', $business_id)
+                ->where('products.type', '!=', 'modifier');
+
+            if (! empty($location_id) && $location_id != 'none') {
+                if ($permitted_locations == 'all' || in_array($location_id, $permitted_locations)) {
+                    $query->whereHas('product_locations', function ($query) use ($location_id) {
+                        $query->where('product_locations.location_id', '=', $location_id);
+                    });
+                }
+            } elseif ($location_id == 'none') {
+                $query->doesntHave('product_locations');
+            } else {
+                if ($permitted_locations != 'all') {
+                    $query->whereHas('product_locations', function ($query) use ($permitted_locations) {
+                        $query->whereIn('product_locations.location_id', $permitted_locations);
+                    });
+                } else {
+                    $query->with('product_locations');
+                }
             }
 
-            $q = $q->offset($start)
-                ->limit($limit)
-                ->orderBy($order,$dir);
-
-            $products = $q->groupBy('products.id')->get();
-            $totalFiltered = $q->groupBy('products.id')->count();
-            /*$totalFiltered = Product::
-                            join('categories', 'products.category_id', '=', 'categories.id')
-                            ->leftjoin('brands', 'products.brand_id', '=', 'brands.id')
-                            ->where([
-                                ['products.name','LIKE',"%{$search}%"],
-                                ['products.is_active', true]
-                            ])
-                            ->orWhere([
-                                ['products.code', 'LIKE', "%{$search}%"],
-                                ['products.is_active', true]
-                            ])
-                            ->orWhere([
-                                ['categories.name', 'LIKE', "%{$search}%"],
-                                ['categories.is_active', true],
-                                ['products.is_active', true]
-                            ])
-                            ->orWhere([
-                                ['brands.title', 'LIKE', "%{$search}%"],
-                                ['brands.is_active', true],
-                                ['products.is_active', true]
-                            ])
-                            ->count();*/
-        }
-        $data = array();
-        if(!empty($products))
-        {
-            foreach ($products as $key=>$product)
-            {
-                $nestedData['id'] = $product->id;
-                $nestedData['key'] = $key;
-                $product_image = explode(",", $product->image);
-                $product_image = htmlspecialchars($product_image[0]);
-                if($product_image && $product_image != 'zummXD2dvAtI.png') {
-                    if(file_exists("public/images/product/small/". $product_image))
-                        $nestedData['image'] = '<img src="'.url('images/product/small', $product_image).'" height="80" width="80">';
-                    else
-                        $nestedData['image'] = '<img src="'.url('images/product', $product_image).'" height="80" width="80">';
-                }
-                else
-                    $nestedData['image'] = '<img src="images/zummXD2dvAtI.png" height="80" width="80">';
-                $nestedData['name'] = $product->name;
-                $nestedData['code'] = $product->code;
-                if($product->brand)
-                    $nestedData['brand'] = $product->brand->title;
-                else
-                    $nestedData['brand'] = "N/A";
-                $nestedData['category'] = $product->category->name;
-                if($warehouse_id > 0 && $product->type == 'standard') {
-                    $nestedData['qty'] = Product_Warehouse::where([
-                                                ['product_id', $product->id],
-                                                ['warehouse_id', $warehouse_id]
-                                            ])->sum('qty');
-                }
-                elseif($product->type == 'standard') {
-                    $nestedData['qty'] = Product_Warehouse::where([
-                        ['product_id', $product->id],
-                    ])->sum('qty');
-                }
-                else
-                    $nestedData['qty'] = $product->qty;
-
-                if($product->unit_id)
-                    $nestedData['unit'] = $product->unit->unit_name;
-                else
-                    $nestedData['unit'] = 'N/A';
-
-                $nestedData['price'] = $product->price;
-                $nestedData['cost'] = $product->cost;
-
-                if(config('currency_position') == 'prefix')
-                    $nestedData['stock_worth'] = config('currency').' '.($nestedData['qty'] * $product->price).' / '.config('currency').' '.($nestedData['qty'] * $product->cost);
-                else
-                    $nestedData['stock_worth'] = ($nestedData['qty'] * $product->price).' '.config('currency').' / '.($nestedData['qty'] * $product->cost).' '.config('currency');
-
-                //fetching custom fields data
-                foreach($field_names as $field_name) {
-                    $nestedData[$field_name] = $product->$field_name;
-                }
-
-                $nestedData['options'] = '<div class="btn-group">
-                            <button type="button" class="btn btn-default dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">'.trans("file.action").'
-                              <span class="caret"></span>
-                              <span class="sr-only">Toggle Dropdown</span>
-                            </button>
-                            <ul class="dropdown-menu edit-options dropdown-menu-right dropdown-default" user="menu">
-                            <li>
-                                <button="type" class="btn btn-link view"><i class="fa fa-eye"></i> '.trans('file.View').'</button>
-                            </li>';
-
-                if(in_array("products-edit", $request['all_permission']))
-                    $nestedData['options'] .= '<li>
-                            <a href="'.route('products.edit', $product->id).'" class="btn btn-link"><i class="fa fa-edit"></i> '.trans('file.edit').'</a>
-                        </li>';
-                if(in_array("product_history", $request['all_permission']))
-                    $nestedData['options'] .= \Form::open(["route" => "products.history", "method" => "GET"] ).'
-                            <li>
-                                <input type="hidden" name="product_id" value="'.$product->id.'" />
-                                <button type="submit" class="btn btn-link"><i class="dripicons-checklist"></i> '.trans("file.Product History").'</button>
-                            </li>'.\Form::close();
-                if(in_array("print_barcode", $request['all_permission'])) {
-                    $product_info = $product->code.' ('.$product->name.')';
-                    $nestedData['options'] .= \Form::open(["route" => "product.printBarcode", "method" => "GET"] ).'
-                        <li>
-                            <input type="hidden" name="data" value="'.$product_info.'" />
-                            <button type="submit" class="btn btn-link"><i class="dripicons-print"></i> '.trans("file.print_barcode").'</button>
-                        </li>'.\Form::close();
-                }
-                if(in_array("products-delete", $request['all_permission']))
-                    $nestedData['options'] .= \Form::open(["route" => ["products.destroy", $product->id], "method" => "DELETE"] ).'
-                            <li>
-                              <button type="submit" class="btn btn-link" onclick="return confirmDelete()"><i class="fa fa-trash"></i> '.trans("file.delete").'</button>
-                            </li>'.\Form::close().'
-                        </ul>
-                    </div>';
-                // data for product details by one click
-                if($product->tax_id)
-                    $tax = Tax::find($product->tax_id)->name;
-                else
-                    $tax = "N/A";
-
-                if($product->tax_method == 1)
-                    $tax_method = trans('file.Exclusive');
-                else
-                    $tax_method = trans('file.Inclusive');
-
-                $nestedData['product'] = array( '[ "'.$product->type.'"', ' "'.$product->name.'"', ' "'.$product->code.'"', ' "'.$nestedData['brand'].'"', ' "'.$nestedData['category'].'"', ' "'.$nestedData['unit'].'"', ' "'.$product->cost.'"', ' "'.$product->price.'"', ' "'.$tax.'"', ' "'.$tax_method.'"', ' "'.$product->alert_quantity.'"', ' "'.preg_replace('/\s+/S', " ", $product->product_details).'"', ' "'.$product->id.'"', ' "'.$product->product_list.'"', ' "'.$product->variant_list.'"', ' "'.$product->qty_list.'"', ' "'.$product->price_list.'"', ' "'.$nestedData['qty'].'"', ' "'.$product->image.'"', ' "'.$product->is_variant.'"]'
+            $products = $query->select(
+                'products.id',
+                'products.name as product',
+                'products.type',
+                'c1.name as category',
+                'c2.name as sub_category',
+                'units.actual_name as unit',
+                'brands.name as brand',
+                'tax_rates.name as tax',
+                'products.sku',
+                'products.image',
+                'products.enable_stock',
+                'products.is_inactive',
+                'products.not_for_selling',
+                'products.product_custom_field1', 'products.product_custom_field2', 'products.product_custom_field3', 'products.product_custom_field4', 'products.product_custom_field5', 'products.product_custom_field6',
+                'products.product_custom_field7', 'products.product_custom_field8', 'products.product_custom_field9',
+                'products.product_custom_field10', 'products.product_custom_field11', 'products.product_custom_field12',
+                'products.product_custom_field13', 'products.product_custom_field14', 'products.product_custom_field15',
+                'products.product_custom_field16', 'products.product_custom_field17', 'products.product_custom_field18', 
+                'products.product_custom_field19', 'products.product_custom_field20',
+                'products.alert_quantity',
+                DB::raw('SUM(vld.qty_available) as current_stock'),
+                DB::raw('MAX(v.sell_price_inc_tax) as max_price'),
+                DB::raw('MIN(v.sell_price_inc_tax) as min_price'),
+                DB::raw('MAX(v.dpp_inc_tax) as max_purchase_price'),
+                DB::raw('MIN(v.dpp_inc_tax) as min_purchase_price')
                 );
-                //$nestedData['imagedata'] = DNS1D::getBarcodePNG($product->code, $product->barcode_symbology);
-                $data[] = $nestedData;
-            }
-        }
-        $json_data = array(
-            "draw"            => intval($request->input('draw')),
-            "recordsTotal"    => intval($totalData),
-            "recordsFiltered" => intval($totalFiltered),
-            "data"            => $data
-        );
 
-        echo json_encode($json_data);
+            //if woocomerce enabled add field to query
+            if ($is_woocommerce) {
+                $products->addSelect('woocommerce_disable_sync');
+            }
+
+            $products->groupBy('products.id');
+
+            $type = request()->get('type', null);
+            if (! empty($type)) {
+                $products->where('products.type', $type);
+            }
+
+            $category_id = request()->get('category_id', null);
+            if (! empty($category_id)) {
+                $products->where('products.category_id', $category_id);
+            }
+
+            $brand_id = request()->get('brand_id', null);
+            if (! empty($brand_id)) {
+                $products->where('products.brand_id', $brand_id);
+            }
+
+            $unit_id = request()->get('unit_id', null);
+            if (! empty($unit_id)) {
+                $products->where('products.unit_id', $unit_id);
+            }
+
+            $tax_id = request()->get('tax_id', null);
+            if (! empty($tax_id)) {
+                $products->where('products.tax', $tax_id);
+            }
+
+            $active_state = request()->get('active_state', null);
+            if ($active_state == 'active') {
+                $products->Active();
+            }
+            if ($active_state == 'inactive') {
+                $products->Inactive();
+            }
+            $not_for_selling = request()->get('not_for_selling', null);
+            if ($not_for_selling == 'true') {
+                $products->ProductNotForSales();
+            }
+
+            $woocommerce_enabled = request()->get('woocommerce_enabled', 0);
+            if ($woocommerce_enabled == 1) {
+                $products->where('products.woocommerce_disable_sync', 0);
+            }
+
+            if (! empty(request()->get('repair_model_id'))) {
+                $products->where('products.repair_model_id', request()->get('repair_model_id'));
+            }
+
+            return Datatables::of($products)
+                ->addColumn(
+                    'product_locations',
+                    function ($row) {
+                        return $row->product_locations->implode('name', ', ');
+                    }
+                )
+                ->editColumn('category', '{{$category}} @if(!empty($sub_category))<br/> -- {{$sub_category}}@endif')
+                ->addColumn(
+                    'action',
+                    function ($row) use ($selling_price_group_count) {
+                        $html =
+                        '<div class="btn-group"><button type="button" class="tw-dw-btn tw-dw-btn-xs tw-dw-btn-outline  tw-dw-btn-info tw-w-max dropdown-toggle" data-toggle="dropdown" aria-expanded="false">'.__('messages.actions').'<span class="caret"></span><span class="sr-only">Toggle Dropdown</span></button><ul class="dropdown-menu dropdown-menu-left" role="menu"><li><a href="'.action([\App\Http\Controllers\LabelsController::class, 'show']).'?product_id='.$row->id.'" data-toggle="tooltip" title="'.__('lang_v1.label_help').'"><i class="fa fa-barcode"></i> '.__('barcode.labels').'</a></li>';
+
+                        if (auth()->user()->can('product.view')) {
+                            $html .=
+                            '<li><a href="'.action([\App\Http\Controllers\ProductController::class, 'view'], [$row->id]).'" class="view-product"><i class="fa fa-eye"></i> '.__('messages.view').'</a></li>';
+                        }
+
+                        if (auth()->user()->can('product.update')) {
+                            $html .=
+                            '<li><a href="'.action([\App\Http\Controllers\ProductController::class, 'edit'], [$row->id]).'"><i class="glyphicon glyphicon-edit"></i> '.__('messages.edit').'</a></li>';
+                        }
+
+                        if (auth()->user()->can('product.delete')) {
+                            $html .=
+                            '<li><a href="'.action([\App\Http\Controllers\ProductController::class, 'destroy'], [$row->id]).'" class="delete-product"><i class="fa fa-trash"></i> '.__('messages.delete').'</a></li>';
+                        }
+
+                        if ($row->is_inactive == 1) {
+                            $html .=
+                            '<li><a href="'.action([\App\Http\Controllers\ProductController::class, 'activate'], [$row->id]).'" class="activate-product"><i class="fas fa-check-circle"></i> '.__('lang_v1.reactivate').'</a></li>';
+                        }
+
+                        $html .= '<li class="divider"></li>';
+
+                        if ($row->enable_stock == 1 && auth()->user()->can('product.opening_stock')) {
+                            $html .=
+                            '<li><a href="#" data-href="'.action([\App\Http\Controllers\OpeningStockController::class, 'add'], ['product_id' => $row->id]).'" class="add-opening-stock"><i class="fa fa-database"></i> '.__('lang_v1.add_edit_opening_stock').'</a></li>';
+                        }
+
+                        if (auth()->user()->can('product.view')) {
+                            $html .=
+                            '<li><a href="'.action([\App\Http\Controllers\ProductController::class, 'productStockHistory'], [$row->id]).'"><i class="fas fa-history"></i> '.__('lang_v1.product_stock_history').'</a></li>';
+                        }
+
+                        if (auth()->user()->can('product.create')) {
+                            if ($selling_price_group_count > 0) {
+                                $html .=
+                                '<li><a href="'.action([\App\Http\Controllers\ProductController::class, 'addSellingPrices'], [$row->id]).'"><i class="fas fa-money-bill-alt"></i> '.__('lang_v1.add_selling_price_group_prices').'</a></li>';
+                            }
+
+                            $html .=
+                                '<li><a href="'.action([\App\Http\Controllers\ProductController::class, 'create'], ['d' => $row->id]).'"><i class="fa fa-copy"></i> '.__('lang_v1.duplicate_product').'</a></li>';
+                        }
+
+                        if (! empty($row->media->first())) {
+                            $html .=
+                                '<li><a href="'.$row->media->first()->display_url.'" download="'.$row->media->first()->display_name.'"><i class="fas fa-download"></i> '.__('lang_v1.product_brochure').'</a></li>';
+                        }
+
+                        $html .= '</ul></div>';
+
+                        return $html;
+                    }
+                )
+                ->editColumn('product', function ($row) use ($is_woocommerce) {
+                    $product = $row->is_inactive == 1 ? e($row->product).' <span class="label bg-gray">'.__('lang_v1.inactive').'</span>' : e($row->product);
+
+                    $product = $row->not_for_selling == 1 ? $product.' <span class="label bg-gray">'.__('lang_v1.not_for_selling').
+                        '</span>' : $product;
+
+                    if ($is_woocommerce && ! $row->woocommerce_disable_sync) {
+                        $product = $product.'<br><i class="fab fa-wordpress"></i>';
+                    }
+
+                    return $product;
+                })
+                ->editColumn('image', function ($row) {
+                    return '<div style="display: flex;"><img src="'.$row->image_url.'" alt="Product image" class="product-thumbnail-small"></div>';
+                })
+                ->editColumn('type', '@lang("lang_v1." . $type)')
+                ->addColumn('mass_delete', function ($row) {
+                    return  '<input type="checkbox" class="row-select" value="'.$row->id.'">';
+                })
+                ->editColumn('current_stock', function ($row) {
+                    if ($row->enable_stock) {
+                        $stock = $this->productUtil->num_f($row->current_stock, false, null, true);
+
+                        return '<span data-is_quantity="true" class="current_stock" data-orig-value="'.$stock.'" data-unit="'.$row->unit.'" >'.$stock.'</span> '.$row->unit;
+                    } else {
+                        return '--';
+                    }
+                })
+                ->addColumn(
+                    'purchase_price',
+                    '<div style="white-space: nowrap;">@format_currency($min_purchase_price) @if($max_purchase_price != $min_purchase_price && $type == "variable") -  @format_currency($max_purchase_price)@endif </div>'
+                )
+                ->addColumn(
+                    'selling_price',
+                    '<div style="white-space: nowrap;">@format_currency($min_price) @if($max_price != $min_price && $type == "variable") -  @format_currency($max_price)@endif </div>'
+                )
+                ->filterColumn('products.sku', function ($query, $keyword) {
+                    $query->whereHas('variations', function ($q) use ($keyword) {
+                        $q->where('sub_sku', 'like', "%{$keyword}%");
+                    })
+                    ->orWhere('products.sku', 'like', "%{$keyword}%");
+                })
+                ->setRowAttr([
+                    'data-href' => function ($row) {
+                        if (auth()->user()->can('product.view')) {
+                            return  action([\App\Http\Controllers\ProductController::class, 'view'], [$row->id]);
+                        } else {
+                            return '';
+                        }
+                    }, ])
+                ->rawColumns(['action', 'image', 'mass_delete', 'product', 'selling_price', 'purchase_price', 'category', 'current_stock'])
+                ->make(true);
+        }
+
+        $rack_enabled = (request()->session()->get('business.enable_racks') || request()->session()->get('business.enable_row') || request()->session()->get('business.enable_position'));
+
+        $categories = Category::forDropdown($business_id, 'product');
+
+        $brands = Brands::forDropdown($business_id);
+
+        $units = Unit::forDropdown($business_id);
+
+        $tax_dropdown = TaxRate::forBusinessDropdown($business_id, false);
+        $taxes = $tax_dropdown['tax_rates'];
+
+        $business_locations = BusinessLocation::forDropdown($business_id);
+        $business_locations->prepend(__('lang_v1.none'), 'none');
+
+        if ($this->moduleUtil->isModuleInstalled('Manufacturing') && (auth()->user()->can('superadmin') || $this->moduleUtil->hasThePermissionInSubscription($business_id, 'manufacturing_module'))) {
+            $show_manufacturing_data = true;
+        } else {
+            $show_manufacturing_data = false;
+        }
+
+        //list product screen filter from module
+        $pos_module_data = $this->moduleUtil->getModuleData('get_filters_for_list_product_screen');
+
+        $is_admin = $this->productUtil->is_admin(auth()->user());
+
+        return view('product.index')
+            ->with(compact(
+                'rack_enabled',
+                'categories',
+                'brands',
+                'units',
+                'taxes',
+                'business_locations',
+                'show_manufacturing_data',
+                'pos_module_data',
+                'is_woocommerce',
+                'is_admin'
+            ));
     }
 
+    /**
+     * Show the form for creating a new resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
     public function create()
     {
-        $role = Role::firstOrCreate(['id' => Auth::user()->role_id]);
-        if ($role->hasPermissionTo('products-add')){
-            $lims_product_list_without_variant = $this->productWithoutVariant();
-            $lims_product_list_with_variant = $this->productWithVariant();
-            $lims_brand_list = Brand::where('is_active', true)->get();
-            $lims_category_list = Category::where('is_active', true)->get();
-            $lims_unit_list = Unit::where('is_active', true)->get();
-            $lims_tax_list = Tax::where('is_active', true)->get();
-            $lims_warehouse_list = Warehouse::where('is_active', true)->get();
-            $numberOfProduct = Product::where('is_active', true)->count();
-            $custom_fields = CustomField::where('belongs_to', 'product')->get();
-            return view('backend.product.create',compact('lims_product_list_without_variant', 'lims_product_list_with_variant', 'lims_brand_list', 'lims_category_list', 'lims_unit_list', 'lims_tax_list', 'lims_warehouse_list', 'numberOfProduct', 'custom_fields'));
+        if (! auth()->user()->can('product.create')) {
+            abort(403, 'Unauthorized action.');
         }
-        else
-            return redirect()->back()->with('not_permitted', 'Sorry! You are not allowed to access this module');
+
+        $business_id = request()->session()->get('user.business_id');
+
+        //Check if subscribed or not, then check for products quota
+        if (! $this->moduleUtil->isSubscribed($business_id)) {
+            return $this->moduleUtil->expiredResponse();
+        } elseif (! $this->moduleUtil->isQuotaAvailable('products', $business_id)) {
+            return $this->moduleUtil->quotaExpiredResponse('products', $business_id, action([\App\Http\Controllers\ProductController::class, 'index']));
+        }
+
+        $categories = Category::forDropdown($business_id, 'product');
+
+        $brands = Brands::forDropdown($business_id);
+        $units = Unit::forDropdown($business_id, true);
+
+        $tax_dropdown = TaxRate::forBusinessDropdown($business_id, true, true);
+        $taxes = $tax_dropdown['tax_rates'];
+        $tax_attributes = $tax_dropdown['attributes'];
+
+        $barcode_types = $this->barcode_types;
+        $barcode_default = $this->productUtil->barcode_default();
+
+        $default_profit_percent = request()->session()->get('business.default_profit_percent');
+
+        //Get all business locations
+        $business_locations = BusinessLocation::forDropdown($business_id);
+
+        //Duplicate product
+        $duplicate_product = null;
+        $rack_details = null;
+
+        $sub_categories = [];
+        if (! empty(request()->input('d'))) {
+            $duplicate_product = Product::where('business_id', $business_id)->find(request()->input('d'));
+            $duplicate_product->name .= ' (copy)';
+
+            if (! empty($duplicate_product->category_id)) {
+                $sub_categories = Category::where('business_id', $business_id)
+                        ->where('parent_id', $duplicate_product->category_id)
+                        ->pluck('name', 'id')
+                        ->toArray();
+            }
+
+            //Rack details
+            if (! empty($duplicate_product->id)) {
+                $rack_details = $this->productUtil->getRackDetails($business_id, $duplicate_product->id);
+            }
+        }
+
+        $selling_price_group_count = SellingPriceGroup::countSellingPriceGroups($business_id);
+
+        $module_form_parts = $this->moduleUtil->getModuleData('product_form_part');
+        $product_types = $this->product_types();
+
+        $common_settings = session()->get('business.common_settings');
+        $warranties = Warranty::forDropdown($business_id);
+
+        //product screen view from module
+        $pos_module_data = $this->moduleUtil->getModuleData('get_product_screen_top_view');
+
+        return view('product.create')
+            ->with(compact('categories', 'brands', 'units', 'taxes', 'barcode_types', 'default_profit_percent', 'tax_attributes', 'barcode_default', 'business_locations', 'duplicate_product', 'sub_categories', 'rack_details', 'selling_price_group_count', 'module_form_parts', 'product_types', 'common_settings', 'warranties', 'pos_module_data'));
     }
 
+    private function product_types()
+    {
+        //Product types also includes modifier.
+        return ['single' => __('lang_v1.single'),
+            'variable' => __('lang_v1.variable'),
+            'combo' => __('lang_v1.combo'),
+        ];
+    }
+
+    /**
+     * Store a newly created resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
     public function store(Request $request)
     {
-        //return $request;
-        $this->validate($request, [
-            'code' => [
-                'max:255',
-                    Rule::unique('products')->where(function ($query) {
-                    return $query->where('is_active', 1);
-                }),
-            ],
-            'name' => [
-                'max:255',
-                    Rule::unique('products')->where(function ($query) {
-                    return $query->where('is_active', 1);
-                }),
-            ]
-        ]);
-        $data = $request->except('image', 'file');
-
-        if(isset($data['is_variant'])) {
-            $data['variant_option'] = json_encode(array_unique($data['variant_option']));
-            $data['variant_value'] = json_encode(array_unique($data['variant_value']));
+        if (! auth()->user()->can('product.create')) {
+            abort(403, 'Unauthorized action.');
         }
-        else {
-            $data['variant_option'] = $data['variant_value'] = null;
-        }
+        try {
+            $business_id = $request->session()->get('user.business_id');
+            $form_fields = ['name', 'brand_id', 'unit_id', 'category_id', 'tax', 'type', 'barcode_type', 'sku', 'alert_quantity', 'tax_type', 'weight', 'product_description', 'sub_unit_ids', 'preparation_time_in_minutes', 'product_custom_field1', 'product_custom_field2', 'product_custom_field3', 'product_custom_field4', 'product_custom_field5', 'product_custom_field6', 'product_custom_field7', 'product_custom_field8', 'product_custom_field9', 'product_custom_field10', 'product_custom_field11', 'product_custom_field12', 'product_custom_field13', 'product_custom_field14', 'product_custom_field15', 'product_custom_field16', 'product_custom_field17', 'product_custom_field18', 'product_custom_field19', 'product_custom_field20',];
 
-        $data['name'] = preg_replace('/[\n\r]/', "<br>", htmlspecialchars(trim($data['name']), ENT_QUOTES));
-
-        if(in_array('ecommerce', explode(',',config('addons')))) {
-            $data['slug'] = Str::slug($data['name'], '-');
-            $data['slug'] = preg_replace('/[^A-Za-z0-9\-]/', '', $data['slug']);
-            $data['slug'] = str_replace( '\/', '/', $data['slug'] );
-        }
-
-        if($data['type'] == 'combo') {
-            $data['product_list'] = implode(",", $data['product_id']);
-            $data['variant_list'] = implode(",", $data['variant_id']);
-            $data['qty_list'] = implode(",", $data['product_qty']);
-            $data['price_list'] = implode(",", $data['unit_price']);
-            //$data['cost'] = $data['unit_id'] = $data['purchase_unit_id'] = $data['sale_unit_id'] = 0;
-        }
-        elseif($data['type'] == 'digital' || $data['type'] == 'service')
-            $data['cost'] = $data['unit_id'] = $data['purchase_unit_id'] = $data['sale_unit_id'] = 0;
-
-        $data['product_details'] = str_replace('"', '@', $data['product_details']);
-
-        if($data['starting_date'])
-            $data['starting_date'] = date('Y-m-d', strtotime($data['starting_date']));
-        if($data['last_date'])
-            $data['last_date'] = date('Y-m-d', strtotime($data['last_date']));
-        $data['is_active'] = true;
-        $images = $request->image;
-        $image_names = [];
-        if ($images) {
-            // Ensure the necessary directories exist using public_path()
-            if (!file_exists(public_path("images/product/xlarge")) && !is_dir(public_path("images/product/xlarge"))) {
-                mkdir(public_path("images/product/xlarge"), 0755, true);
-            }
-            if (!file_exists(public_path("images/product/large")) && !is_dir(public_path("images/product/large"))) {
-                mkdir(public_path("images/product/large"), 0755, true);
-            }
-            if (!file_exists(public_path("images/product/medium")) && !is_dir(public_path("images/product/medium"))) {
-                mkdir(public_path("images/product/medium"), 0755, true);
-            }
-            if (!file_exists(public_path("images/product/small")) && !is_dir(public_path("images/product/small"))) {
-                mkdir(public_path("images/product/small"), 0755, true);
+            $module_form_fields = $this->moduleUtil->getModuleFormField('product_form_fields');
+            if (! empty($module_form_fields)) {
+                $form_fields = array_merge($form_fields, $module_form_fields);
             }
 
-            foreach ($images as $key => $image) {
-                $ext = pathinfo($image->getClientOriginalName(), PATHINFO_EXTENSION);
-                $imageName = date("Ymdhis") . ($key + 1);
+            $product_details = $request->only($form_fields);
+            $product_details['business_id'] = $business_id;
+            $product_details['created_by'] = $request->session()->get('user.id');
 
-                // Handle multi-tenant logic if necessary
-                if (!config('database.connections.saleprosaas_landlord')) {
-                    $imageName = $imageName . '.' . $ext;
+            $product_details['enable_stock'] = (! empty($request->input('enable_stock')) && $request->input('enable_stock') == 1) ? 1 : 0;
+            $product_details['not_for_selling'] = (! empty($request->input('not_for_selling')) && $request->input('not_for_selling') == 1) ? 1 : 0;
+
+            if (! empty($request->input('sub_category_id'))) {
+                $product_details['sub_category_id'] = $request->input('sub_category_id');
+            }
+
+            if (! empty($request->input('secondary_unit_id'))) {
+                $product_details['secondary_unit_id'] = $request->input('secondary_unit_id');
+            }
+
+            if (empty($product_details['sku'])) {
+                $product_details['sku'] = ' ';
+            }
+
+            if (! empty($product_details['alert_quantity'])) {
+                $product_details['alert_quantity'] = $this->productUtil->num_uf($product_details['alert_quantity']);
+            }
+
+            $expiry_enabled = $request->session()->get('business.enable_product_expiry');
+            if (! empty($request->input('expiry_period_type')) && ! empty($request->input('expiry_period')) && ! empty($expiry_enabled) && ($product_details['enable_stock'] == 1)) {
+                $product_details['expiry_period_type'] = $request->input('expiry_period_type');
+                $product_details['expiry_period'] = $this->productUtil->num_uf($request->input('expiry_period'));
+            }
+
+            if (! empty($request->input('enable_sr_no')) && $request->input('enable_sr_no') == 1) {
+                $product_details['enable_sr_no'] = 1;
+            }
+
+            //upload document
+            $product_details['image'] = $this->productUtil->uploadFile($request, 'image', config('constants.product_img_path'), 'image');
+            $common_settings = session()->get('business.common_settings');
+
+            $product_details['warranty_id'] = ! empty($request->input('warranty_id')) ? $request->input('warranty_id') : null;
+
+            DB::beginTransaction();
+
+            $product = Product::create($product_details);
+
+            event(new ProductsCreatedOrModified($product_details, 'added'));
+
+            if (empty(trim($request->input('sku')))) {
+                $sku = $this->productUtil->generateProductSku($product->id);
+                $product->sku = $sku;
+                $product->save();
+            }
+
+            //Add product locations
+            $product_locations = $request->input('product_locations');
+            if (! empty($product_locations)) {
+                $product->product_locations()->sync($product_locations);
+            }
+
+            if ($product->type == 'single') {
+                $this->productUtil->createSingleProductVariation($product->id, $product->sku, $request->input('single_dpp'), $request->input('single_dpp_inc_tax'), $request->input('profit_percent'), $request->input('single_dsp'), $request->input('single_dsp_inc_tax'));
+            } elseif ($product->type == 'variable') {
+                if (! empty($request->input('product_variation'))) {
+                    $input_variations = $request->input('product_variation');
                     
-                } else {
-                    $imageName = $this->getTenantId() . '_' . $imageName . '.' . $ext;
+                    $this->productUtil->createVariableProductVariations($product->id, $input_variations, $request->input('sku_type'));
                 }
+            } elseif ($product->type == 'combo') {
 
-                $image->move(public_path('images/product'), $imageName);
+                //Create combo_variations array by combining variation_id and quantity.
+                $combo_variations = [];
+                if (! empty($request->input('composition_variation_id'))) {
+                    $composition_variation_id = $request->input('composition_variation_id');
+                    $quantity = $request->input('quantity');
+                    $unit = $request->input('unit');
 
-                $manager = new ImageManager(Driver::class);
-                $image = $manager->read(public_path('images/product/'). $imageName);
-
-                $image->cover(1000, 1250)->save(public_path('images/product/xlarge/'). $imageName, 100);
-
-                $image->cover(500, 500)->save(public_path('images/product/large/'). $imageName, 100);
-
-                $image->cover(250, 250)->save(public_path('images/product/medium/' . $imageName), 100);
-
-                $image->cover(100, 100)->save(public_path('images/product/small/' . $imageName), 100);
-
-                // Collect image names for saving in the database
-                $image_names[] = $imageName;
-            }
-
-            // Save the image names in the database
-            $data['image'] = implode(",", $image_names);
-        }
-
-        else {
-            $data['image'] = 'zummXD2dvAtI.png';
-        }
-        $file = $request->file;
-        if ($file) {
-            $ext = pathinfo($file->getClientOriginalName(), PATHINFO_EXTENSION);
-            $fileName = strtotime(date('Y-m-d H:i:s'));
-            $fileName = $fileName . '.' . $ext;
-            $file->move(public_path('product/files'), $fileName);
-            $data['file'] = $fileName;
-        }
-        if(!isset($data['is_sync_disable']) && \Schema::hasColumn('products', 'is_sync_disable'))
-                $data['is_sync_disable'] = null;
-        //return $data;
-        $lims_product_data = Product::create($data);
-        //inserting custom field data
-        $custom_field_data = [];
-        $custom_fields = CustomField::where('belongs_to', 'product')->select('name', 'type')->get();
-        foreach ($custom_fields as $type => $custom_field) {
-            $field_name = str_replace(' ', '_', strtolower($custom_field->name));
-            if(isset($data[$field_name])) {
-                if($custom_field->type == 'checkbox' || $custom_field->type == 'multi_select')
-                    $custom_field_data[$field_name] = implode(",", $data[$field_name]);
-                else
-                    $custom_field_data[$field_name] = $data[$field_name];
-            }
-        }
-        if(count($custom_field_data))
-            DB::table('products')->where('id', $lims_product_data->id)->update($custom_field_data);
-        //dealing with initial stock and auto purchase
-        $initial_stock = 0;
-        if(isset($data['is_initial_stock']) && !isset($data['is_variant']) && !isset($data['is_batch'])) {
-            foreach ($data['stock_warehouse_id'] as $key => $warehouse_id) {
-                $stock = $data['stock'][$key];
-                if($stock > 0) {
-                    $this->autoPurchase($lims_product_data, $warehouse_id, $stock);
-                    $initial_stock += $stock;
-                }
-            }
-        }
-        if($initial_stock > 0) {
-            $lims_product_data->qty += $initial_stock;
-            $lims_product_data->save();
-        }
-        //dealing with product variant
-        if(!isset($data['is_batch']))
-            $data['is_batch'] = null;
-        $variant_ids = [];
-        if(isset($data['is_variant'])) {
-            foreach ($data['variant_name'] as $key => $variant_name) {
-                $lims_variant_data = Variant::firstOrCreate(['name' => $data['variant_name'][$key]]);
-                $variant_ids[] = $lims_variant_data->id;
-                $product_variant = ProductVariant::firstOrNew([
-                    'product_id' => $lims_product_data->id,
-                    'variant_id' => $lims_variant_data->id,
-                    'item_code' => $data['item_code'][$key],
-                    'additional_cost' => $data['additional_cost'][$key],
-                    'additional_price' => $data['additional_price'][$key],
-                    'qty' => 0,
-                ]);
-                $product_variant->position = $key + 1;
-                $product_variant->save();
-            }
-        }
-        if(isset($data['is_diffPrice'])) {
-            foreach ($data['diff_price'] as $key => $diff_price) {
-                if($diff_price) {
-                    Product_Warehouse::firstOrCreate([
-                        "product_id" => $lims_product_data->id,
-                        "warehouse_id" => $data["warehouse_id"][$key],
-                        "qty" => 0,
-                        "price" => $diff_price
-                    ]);
-                }
-            }
-        }
-        elseif(!isset($data['is_initial_stock']) && !isset($data['is_batch']) && config('without_stock') == 'yes') {
-            $warehouse_ids = Warehouse::where('is_active', true)->pluck('id');
-            foreach ($warehouse_ids as $warehouse_id) {
-                if(count($variant_ids)) {
-                    foreach ($variant_ids as $variant_id) {
-                        Product_Warehouse::firstOrCreate([
-                            "product_id" => $lims_product_data->id,
-                            "variant_id" => $variant_id,
-                            "warehouse_id" => $warehouse_id,
-                            "qty" => 0,
-                        ]);
+                    foreach ($composition_variation_id as $key => $value) {
+                        $combo_variations[] = [
+                            'variation_id' => $value,
+                            'quantity' => $this->productUtil->num_uf($quantity[$key]),
+                            'unit_id' => $unit[$key],
+                        ];
                     }
                 }
-                else {
-                    Product_Warehouse::firstOrCreate([
-                        "product_id" => $lims_product_data->id,
-                        "warehouse_id" => $warehouse_id,
-                        "qty" => 0,
-                    ]);
-                }
+
+                $this->productUtil->createSingleProductVariation($product->id, $product->sku, $request->input('item_level_purchase_price_total'), $request->input('purchase_price_inc_tax'), $request->input('profit_percent'), $request->input('selling_price'), $request->input('selling_price_inc_tax'), $combo_variations);
             }
+
+            //Add product racks details.
+            $product_racks = $request->get('product_racks', null);
+            if (! empty($product_racks)) {
+                $this->productUtil->addRackDetails($business_id, $product->id, $product_racks);
+            }
+
+            //Set Module fields
+            if (! empty($request->input('has_module_data'))) {
+                $this->moduleUtil->getModuleData('after_product_saved', ['product' => $product, 'request' => $request]);
+            }
+
+            Media::uploadMedia($product->business_id, $product, $request, 'product_brochure', true);
+
+            DB::commit();
+            $output = ['success' => 1,
+                'msg' => __('product.product_added_success'),
+            ];
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => 0,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+
+            return redirect('products')->with('status', $output);
         }
-        $this->cacheForget('product_list');
-        $this->cacheForget('product_list_with_variant');
-        \Session::flash('create_message', 'Product created successfully');
+
+        if ($request->input('submit_type') == 'submit_n_add_opening_stock') {
+            return redirect()->action([\App\Http\Controllers\OpeningStockController::class, 'add'],
+                ['product_id' => $product->id]
+            );
+        } elseif ($request->input('submit_type') == 'submit_n_add_selling_prices') {
+            return redirect()->action([\App\Http\Controllers\ProductController::class, 'addSellingPrices'],
+                [$product->id]
+            );
+        } elseif ($request->input('submit_type') == 'save_n_add_another') {
+            return redirect()->action([\App\Http\Controllers\ProductController::class, 'create']
+            )->with('status', $output);
+        }
+
+        return redirect('products')->with('status', $output);
     }
 
-    public function autoPurchase($product_data, $warehouse_id, $stock)
+    /**
+     * Display the specified resource.
+     *
+     * @param  \App\Product  $product
+     * @return \Illuminate\Http\Response
+     */
+    public function show($id)
     {
-        $data['reference_no'] = 'pr-' . date("Ymd") . '-'. date("his");
-        $data['user_id'] = Auth::id();
-        $data['warehouse_id'] = $warehouse_id;
-        $data['item'] = 1;
-        $data['total_qty'] = $stock;
-        $data['total_discount'] = 0;
-        $data['status'] = 1;
-        $data['payment_status'] = 2;
-        if($product_data->tax_id) {
-            $tax_data = DB::table('taxes')->select('rate')->find($product_data->tax_id);
-            if($product_data->tax_method == 1) {
-                $net_unit_cost = number_format($product_data->cost, 2, '.', '');
-                $tax = number_format($product_data->cost * $stock * ($tax_data->rate / 100), 2, '.', '');
-                $cost = number_format(($product_data->cost * $stock) + $tax, 2, '.', '');
-            }
-            else {
-                $net_unit_cost = number_format((100 / (100 + $tax_data->rate)) * $product_data->cost, 2, '.', '');
-                $tax = number_format(($product_data->cost - $net_unit_cost) * $stock, 2, '.', '');
-                $cost = number_format($product_data->cost * $stock, 2, '.', '');
-            }
-            $tax_rate = $tax_data->rate;
-            $data['total_tax'] = $tax;
-            $data['total_cost'] = $cost;
-        }
-        else {
-            $data['total_tax'] = 0.00;
-            $data['total_cost'] = number_format($product_data->cost * $stock, 2, '.', '');
-            $net_unit_cost = number_format($product_data->cost, 2, '.', '');
-            $tax_rate = 0.00;
-            $tax = 0.00;
-            $cost = number_format($product_data->cost * $stock, 2, '.', '');
+        if (! auth()->user()->can('product.view')) {
+            abort(403, 'Unauthorized action.');
         }
 
-        $product_warehouse_data = Product_Warehouse::select('id', 'qty')
-                                ->where([
-                                    ['product_id', $product_data->id],
-                                    ['warehouse_id', $warehouse_id]
-                                ])->first();
-        if($product_warehouse_data) {
-            $product_warehouse_data->qty += $stock;
-            $product_warehouse_data->save();
-        }
-        else {
-            $lims_product_warehouse_data = new Product_Warehouse();
-            $lims_product_warehouse_data->product_id = $product_data->id;
-            $lims_product_warehouse_data->warehouse_id = $warehouse_id;
-            $lims_product_warehouse_data->qty = $stock;
-            $lims_product_warehouse_data->save();
-        }
-        $data['order_tax'] = 0;
-        $data['grand_total'] = $data['total_cost'];
-        $data['paid_amount'] = $data['grand_total'];
-        //insetting data to purchase table
-        $purchase_data = Purchase::create($data);
-        //inserting data to product_purchases table
-        ProductPurchase::create([
-            'purchase_id' => $purchase_data->id,
-            'product_id' => $product_data->id,
-            'qty' => $stock,
-            'recieved' => $stock,
-            'purchase_unit_id' => $product_data->unit_id,
-            'net_unit_cost' => $net_unit_cost,
-            'discount' => 0,
-            'tax_rate' => $tax_rate,
-            'tax' => $tax,
-            'total' => $cost
-        ]);
-        //inserting data to payments table
-        Payment::create([
-            'payment_reference' => 'ppr-' . date("Ymd") . '-'. date("his"),
-            'user_id' => Auth::id(),
-            'purchase_id' => $purchase_data->id,
-            'account_id' => 0,
-            'amount' => $data['grand_total'],
-            'change' => 0,
-            'paying_method' => 'Cash'
-        ]);
+        $business_id = request()->session()->get('user.business_id');
+        $details = $this->productUtil->getRackDetails($business_id, $id, true);
+
+        return view('product.show')->with(compact('details'));
     }
 
-    public function history(Request $request)
-    {
-        $role = Role::find(Auth::user()->role_id);
-        if($role->hasPermissionTo('product_history')) {
-            if($request->input('warehouse_id'))
-                $warehouse_id = $request->input('warehouse_id');
-            else
-                $warehouse_id = 0;
-
-            if($request->input('starting_date')) {
-                $starting_date = $request->input('starting_date');
-                $ending_date = $request->input('ending_date');
-            }
-            else {
-                $starting_date = date("Y-m-d", strtotime(date('Y-m-d', strtotime('-1 year', strtotime(date('Y-m-d') )))));
-                $ending_date = date("Y-m-d");
-            }
-            $product_id = $request->input('product_id');
-            $product_data = Product::select('name', 'code')->find($product_id);
-            $lims_warehouse_list = Warehouse::where('is_active', true)->get();
-            return view('backend.product.history',compact('starting_date', 'ending_date', 'warehouse_id', 'product_id', 'product_data', 'lims_warehouse_list'));
-        }
-        else
-            return redirect()->back()->with('not_permitted', 'Sorry! You are not allowed to access this module');
-    }
-
-    public function saleHistoryData(Request $request)
-    {
-        $columns = array(
-            1 => 'created_at',
-            2 => 'reference_no',
-        );
-
-        $product_id = $request->input('product_id');
-        $warehouse_id = $request->input('warehouse_id');
-
-        $q = DB::table('sales')
-            ->join('product_sales', 'sales.id', '=', 'product_sales.sale_id')
-            ->where('product_sales.product_id', $product_id)
-            ->whereDate('sales.created_at', '>=' ,$request->input('starting_date'))
-            ->whereDate('sales.created_at', '<=' ,$request->input('ending_date'));
-        if($warehouse_id)
-            $q = $q->where('warehouse_id', $warehouse_id);
-        if(Auth::user()->role_id > 2 && config('staff_access') == 'own')
-            $q = $q->where('sales.user_id', Auth::id());
-
-        $totalData = $q->count();
-        $totalFiltered = $totalData;
-
-        if($request->input('length') != -1)
-            $limit = $request->input('length');
-        else
-            $limit = $totalData;
-        $start = $request->input('start');
-        $order = 'sales.'.$columns[$request->input('order.0.column')];
-        $dir = $request->input('order.0.dir');
-        $q = $q->join('customers', 'sales.customer_id', '=', 'customers.id')
-                ->join('warehouses', 'sales.warehouse_id', '=', 'warehouses.id')
-                ->select('sales.id', 'sales.reference_no', 'sales.created_at', 'customers.name as customer_name', 'customers.phone_number as customer_number', 'warehouses.name as warehouse_name', 'product_sales.qty', 'product_sales.sale_unit_id', 'product_sales.total')
-                ->offset($start)
-                ->limit($limit)
-                ->orderBy($order, $dir);
-        if(empty($request->input('search.value'))) {
-            $sales = $q->get();
-        }
-        else
-        {
-            $search = $request->input('search.value');
-            $q = $q->whereDate('sales.created_at', '=' , date('Y-m-d', strtotime(str_replace('/', '-', $search))));
-            if(Auth::user()->role_id > 2 && config('staff_access') == 'own') {
-                $sales =  $q->orwhere([
-                                ['sales.reference_no', 'LIKE', "%{$search}%"],
-                                ['sales.user_id', Auth::id()]
-                            ])
-                            ->get();
-                $totalFiltered = $q->orwhere([
-                                    ['sales.reference_no', 'LIKE', "%{$search}%"],
-                                    ['sales.user_id', Auth::id()]
-                                ])
-                                ->count();
-            }
-            else {
-                $sales =  $q->orwhere('sales.reference_no', 'LIKE', "%{$search}%")->get();
-                $totalFiltered = $q->orwhere('sales.reference_no', 'LIKE', "%{$search}%")->count();
-            }
-        }
-        $data = array();
-        if(!empty($sales))
-        {
-            foreach ($sales as $key => $sale)
-            {
-                $nestedData['id'] = $sale->id;
-                $nestedData['key'] = $key;
-                $nestedData['date'] = date(config('date_format'), strtotime($sale->created_at));
-                $nestedData['reference_no'] = $sale->reference_no;
-                $nestedData['warehouse'] = $sale->warehouse_name;
-                $nestedData['customer'] = $sale->customer_name.' ['.($sale->customer_number).']';
-                $nestedData['qty'] = number_format($sale->qty, config('decimal'));
-                if($sale->sale_unit_id) {
-                    $unit_data = DB::table('units')->select('unit_code')->find($sale->sale_unit_id);
-                    $nestedData['qty'] .= ' '.$unit_data->unit_code;
-                }
-                $nestedData['unit_price'] = number_format(($sale->total / $sale->qty), config('decimal'));
-                $nestedData['sub_total'] = number_format($sale->total, config('decimal'));
-                $data[] = $nestedData;
-            }
-        }
-        $json_data = array(
-            "draw"            => intval($request->input('draw')),
-            "recordsTotal"    => intval($totalData),
-            "recordsFiltered" => intval($totalFiltered),
-            "data"            => $data
-        );
-        echo json_encode($json_data);
-    }
-
-    public function purchaseHistoryData(Request $request)
-    {
-        $columns = array(
-            1 => 'created_at',
-            2 => 'reference_no',
-        );
-
-        $product_id = $request->input('product_id');
-        $warehouse_id = $request->input('warehouse_id');
-
-        $q = DB::table('purchases')
-            ->join('product_purchases', 'purchases.id', '=', 'product_purchases.purchase_id')
-            ->where('product_purchases.product_id', $product_id)
-            ->whereDate('purchases.created_at', '>=' ,$request->input('starting_date'))
-            ->whereDate('purchases.created_at', '<=' ,$request->input('ending_date'));
-        if($warehouse_id)
-            $q = $q->where('warehouse_id', $warehouse_id);
-        if(Auth::user()->role_id > 2 && config('staff_access') == 'own')
-            $q = $q->where('purchases.user_id', Auth::id());
-
-        $totalData = $q->count();
-        $totalFiltered = $totalData;
-
-        if($request->input('length') != -1)
-            $limit = $request->input('length');
-        else
-            $limit = $totalData;
-        $start = $request->input('start');
-        $order = 'purchases.'.$columns[$request->input('order.0.column')];
-        $dir = $request->input('order.0.dir');
-        $q = $q->leftJoin('suppliers', 'purchases.supplier_id', '=', 'suppliers.id')
-                ->join('warehouses', 'purchases.warehouse_id', '=', 'warehouses.id')
-                ->offset($start)
-                ->limit($limit)
-                ->orderBy($order, $dir);
-        if(empty($request->input('search.value'))) {
-            $purchases = $q->select('purchases.id', 'purchases.reference_no', 'purchases.created_at', 'purchases.supplier_id', 'suppliers.name as supplier_name', 'suppliers.phone_number as supplier_number', 'warehouses.name as warehouse_name', 'product_purchases.qty', 'product_purchases.purchase_unit_id', 'product_purchases.total')->get();
-        }
-        else
-        {
-            $search = $request->input('search.value');
-            $q = $q->whereDate('purchases.created_at', '=' , date('Y-m-d', strtotime(str_replace('/', '-', $search))));
-            if(Auth::user()->role_id > 2 && config('staff_access') == 'own') {
-                $purchases =  $q->select('purchases.id', 'purchases.reference_no', 'purchases.created_at', 'purchases.supplier_id', 'suppliers.name as supplier_name', 'suppliers.phone_number as supplier_number', 'warehouses.name as warehouse_name', 'product_purchases.qty', 'product_purchases.purchase_unit_id', 'product_purchases.total')
-                            ->orwhere([
-                                ['purchases.reference_no', 'LIKE', "%{$search}%"],
-                                ['purchases.user_id', Auth::id()]
-                            ])->get();
-                $totalFiltered = $q->orwhere([
-                                    ['purchases.reference_no', 'LIKE', "%{$search}%"],
-                                    ['purchases.user_id', Auth::id()]
-                                ])->count();
-            }
-            else {
-                $purchases =  $q->select('purchases.id', 'purchases.reference_no', 'purchases.created_at', 'purchases.supplier_id', 'suppliers.name as supplier_name', 'suppliers.phone_number as supplier_number', 'warehouses.name as warehouse_name', 'product_purchases.qty', 'product_purchases.purchase_unit_id', 'product_purchases.total')
-                            ->orwhere('purchases.reference_no', 'LIKE', "%{$search}%")
-                            ->get();
-                $totalFiltered = $q->orwhere('purchases.reference_no', 'LIKE', "%{$search}%")->count();
-            }
-        }
-        $data = array();
-        if(!empty($purchases))
-        {
-            foreach ($purchases as $key => $purchase)
-            {
-                $nestedData['id'] = $purchase->id;
-                $nestedData['key'] = $key;
-                $nestedData['date'] = date(config('date_format'), strtotime($purchase->created_at));
-                $nestedData['reference_no'] = $purchase->reference_no;
-                $nestedData['warehouse'] = $purchase->warehouse_name;
-                if($purchase->supplier_id)
-                    $nestedData['supplier'] = $purchase->supplier_name.' ['.($purchase->supplier_number).']';
-                else
-                    $nestedData['supplier'] = 'N/A';
-                $nestedData['qty'] = number_format($purchase->qty, config('decimal'));
-                if($purchase->purchase_unit_id) {
-                    $unit_data = DB::table('units')->select('unit_code')->find($purchase->purchase_unit_id);
-                    $nestedData['qty'] .= ' '.$unit_data->unit_code;
-                }
-                $nestedData['unit_cost'] = number_format(($purchase->total / $purchase->qty), config('decimal'));
-                $nestedData['sub_total'] = number_format($purchase->total, config('decimal'));
-                $data[] = $nestedData;
-            }
-        }
-        $json_data = array(
-            "draw"            => intval($request->input('draw')),
-            "recordsTotal"    => intval($totalData),
-            "recordsFiltered" => intval($totalFiltered),
-            "data"            => $data
-        );
-        echo json_encode($json_data);
-    }
-
-    public function saleReturnHistoryData(Request $request)
-    {
-        $columns = array(
-            1 => 'created_at',
-            2 => 'reference_no',
-        );
-
-        $product_id = $request->input('product_id');
-        $warehouse_id = $request->input('warehouse_id');
-
-        $q = DB::table('returns')
-            ->join('product_returns', 'returns.id', '=', 'product_returns.return_id')
-            ->where('product_returns.product_id', $product_id)
-            ->whereDate('returns.created_at', '>=' ,$request->input('starting_date'))
-            ->whereDate('returns.created_at', '<=' ,$request->input('ending_date'));
-        if($warehouse_id)
-            $q = $q->where('warehouse_id', $warehouse_id);
-        if(Auth::user()->role_id > 2 && config('staff_access') == 'own')
-            $q = $q->where('returns.user_id', Auth::id());
-
-        $totalData = $q->count();
-        $totalFiltered = $totalData;
-
-        if($request->input('length') != -1)
-            $limit = $request->input('length');
-        else
-            $limit = $totalData;
-        $start = $request->input('start');
-        $order = 'returns.'.$columns[$request->input('order.0.column')];
-        $dir = $request->input('order.0.dir');
-        $q = $q->join('customers', 'returns.customer_id', '=', 'customers.id')
-                ->join('warehouses', 'returns.warehouse_id', '=', 'warehouses.id')
-                ->offset($start)
-                ->limit($limit)
-                ->orderBy($order, $dir);
-        if(empty($request->input('search.value'))) {
-            $returnss = $q->select('returns.id', 'returns.reference_no', 'returns.created_at', 'customers.name as customer_name', 'customers.phone_number as customer_number', 'warehouses.name as warehouse_name', 'product_returns.qty', 'product_returns.sale_unit_id', 'product_returns.total')->get();
-        }
-        else
-        {
-            $search = $request->input('search.value');
-            $q = $q->whereDate('returns.created_at', '=' , date('Y-m-d', strtotime(str_replace('/', '-', $search))));
-            if(Auth::user()->role_id > 2 && config('staff_access') == 'own') {
-                $returnss =  $q->select('returns.id', 'returns.reference_no', 'returns.created_at', 'customers.name as customer_name', 'customers.phone_number as customer_number', 'warehouses.name as warehouse_name', 'product_returns.qty', 'product_returns.sale_unit_id', 'product_returns.total')
-                            ->orwhere([
-                                ['returns.reference_no', 'LIKE', "%{$search}%"],
-                                ['returns.user_id', Auth::id()]
-                            ])
-                            ->get();
-                $totalFiltered = $q->orwhere([
-                                    ['returns.reference_no', 'LIKE', "%{$search}%"],
-                                    ['returns.user_id', Auth::id()]
-                                ])
-                                ->count();
-            }
-            else {
-                $returnss =  $q->select('returns.id', 'returns.reference_no', 'returns.created_at', 'customers.name as customer_name', 'customers.phone_number as customer_number', 'warehouses.name as warehouse_name', 'product_returns.qty', 'product_returns.sale_unit_id', 'product_returns.total')
-                            ->orwhere('returns.reference_no', 'LIKE', "%{$search}%")
-                            ->get();
-                $totalFiltered = $q->orwhere('returns.reference_no', 'LIKE', "%{$search}%")->count();
-            }
-        }
-        $data = array();
-        if(!empty($returnss))
-        {
-            foreach ($returnss as $key => $returns)
-            {
-                $nestedData['id'] = $returns->id;
-                $nestedData['key'] = $key;
-                $nestedData['date'] = date(config('date_format'), strtotime($returns->created_at));
-                $nestedData['reference_no'] = $returns->reference_no;
-                $nestedData['warehouse'] = $returns->warehouse_name;
-                $nestedData['customer'] = $returns->customer_name.' ['.($returns->customer_number).']';
-                $nestedData['qty'] = number_format($returns->qty, config('decimal'));
-                if($returns->sale_unit_id) {
-                    $unit_data = DB::table('units')->select('unit_code')->find($returns->sale_unit_id);
-                    $nestedData['qty'] .= ' '.$unit_data->unit_code;
-                }
-                $nestedData['unit_price'] = number_format(($returns->total / $returns->qty), config('decimal'));
-                $nestedData['sub_total'] = number_format($returns->total, config('decimal'));
-                $data[] = $nestedData;
-            }
-        }
-        $json_data = array(
-            "draw"            => intval($request->input('draw')),
-            "recordsTotal"    => intval($totalData),
-            "recordsFiltered" => intval($totalFiltered),
-            "data"            => $data
-        );
-        echo json_encode($json_data);
-    }
-
-    public function purchaseReturnHistoryData(Request $request)
-    {
-        $columns = array(
-            1 => 'created_at',
-            2 => 'reference_no',
-        );
-
-        $product_id = $request->input('product_id');
-        $warehouse_id = $request->input('warehouse_id');
-
-        $q = DB::table('return_purchases')
-            ->join('purchase_product_return', 'return_purchases.id', '=', 'purchase_product_return.return_id')
-            ->where('purchase_product_return.product_id', $product_id)
-            ->whereDate('return_purchases.created_at', '>=' ,$request->input('starting_date'))
-            ->whereDate('return_purchases.created_at', '<=' ,$request->input('ending_date'));
-        if($warehouse_id)
-            $q = $q->where('warehouse_id', $warehouse_id);
-        if(Auth::user()->role_id > 2 && config('staff_access') == 'own')
-            $q = $q->where('return_purchases.user_id', Auth::id());
-
-        $totalData = $q->count();
-        $totalFiltered = $totalData;
-
-        if($request->input('length') != -1)
-            $limit = $request->input('length');
-        else
-            $limit = $totalData;
-        $start = $request->input('start');
-        $order = 'return_purchases.'.$columns[$request->input('order.0.column')];
-        $dir = $request->input('order.0.dir');
-        $q = $q->leftJoin('suppliers', 'return_purchases.supplier_id', '=', 'suppliers.id')
-                ->join('warehouses', 'return_purchases.warehouse_id', '=', 'warehouses.id')
-                ->select('return_purchases.id', 'return_purchases.reference_no', 'return_purchases.created_at', 'return_purchases.supplier_id', 'suppliers.name as supplier_name', 'suppliers.phone_number as supplier_number', 'warehouses.name as warehouse_name', 'purchase_product_return.qty', 'purchase_product_return.purchase_unit_id', 'purchase_product_return.total')
-                ->offset($start)
-                ->limit($limit)
-                ->orderBy($order, $dir);
-        if(empty($request->input('search.value'))) {
-            $return_purchases = $q->get();
-        }
-        else
-        {
-            $search = $request->input('search.value');
-            $q = $q->whereDate('return_purchases.created_at', '=' , date('Y-m-d', strtotime(str_replace('/', '-', $search))));
-
-            if(Auth::user()->role_id > 2 && config('staff_access') == 'own') {
-                $return_purchases =  $q->orwhere([
-                                        ['return_purchases.reference_no', 'LIKE', "%{$search}%"],
-                                        ['return_purchases.user_id', Auth::id()]
-                                    ])
-                                    ->get();
-                $totalFiltered = $q->orwhere([
-                                    ['return_purchases.reference_no', 'LIKE', "%{$search}%"],
-                                    ['return_purchases.user_id', Auth::id()]
-                                ])
-                                ->count();
-            }
-            else {
-                $return_purchases =  $q->orwhere('return_purchases.reference_no', 'LIKE', "%{$search}%")->get();
-                $totalFiltered = $q->orwhere('return_purchases.reference_no', 'LIKE', "%{$search}%")->count();
-            }
-        }
-        $data = array();
-        if(!empty($return_purchases))
-        {
-            foreach ($return_purchases as $key => $return_purchase)
-            {
-                $nestedData['id'] = $return_purchase->id;
-                $nestedData['key'] = $key;
-                $nestedData['date'] = date(config('date_format'), strtotime($return_purchase->created_at));
-                $nestedData['reference_no'] = $return_purchase->reference_no;
-                $nestedData['warehouse'] = $return_purchase->warehouse_name;
-                if($return_purchase->supplier_id)
-                    $nestedData['supplier'] = $return_purchase->supplier_name.' ['.($return_purchase->supplier_number).']';
-                else
-                    $nestedData['supplier'] = 'N/A';
-                $nestedData['qty'] = number_format($return_purchase->qty, config('decimal'));
-                if($return_purchase->purchase_unit_id) {
-                    $unit_data = DB::table('units')->select('unit_code')->find($return_purchase->purchase_unit_id);
-                    $nestedData['qty'] .= ' '.$unit_data->unit_code;
-                }
-                $nestedData['unit_cost'] = number_format(($return_purchase->total / $return_purchase->qty), config('decimal'));
-                $nestedData['sub_total'] = number_format($return_purchase->total, config('decimal'));
-                $data[] = $nestedData;
-            }
-        }
-        $json_data = array(
-            "draw"            => intval($request->input('draw')),
-            "recordsTotal"    => intval($totalData),
-            "recordsFiltered" => intval($totalFiltered),
-            "data"            => $data
-        );
-        echo json_encode($json_data);
-    }
-
-    public function variantData($id)
-    {
-        if(Auth::user()->role_id > 2) {
-            return ProductVariant::join('variants', 'product_variants.variant_id', '=', 'variants.id')
-                ->join('product_warehouse', function($join) {
-                    $join->on('product_variants.product_id', '=', 'product_warehouse.product_id');
-                    $join->on('product_variants.variant_id', '=', 'product_warehouse.variant_id');
-                })
-                ->select('variants.name', 'product_variants.item_code', 'product_variants.additional_cost', 'product_variants.additional_price', 'product_warehouse.qty')
-                ->where([
-                    ['product_warehouse.product_id', $id],
-                    ['product_warehouse.warehouse_id', Auth::user()->warehouse_id]
-                ])
-                ->orderBy('product_variants.position')
-                ->get();
-        }
-        else {
-            return ProductVariant::join('variants', 'product_variants.variant_id', '=', 'variants.id')
-                ->select('variants.name', 'product_variants.item_code', 'product_variants.additional_cost', 'product_variants.additional_price', 'product_variants.qty')
-                ->orderBy('product_variants.position')
-                ->where('product_id', $id)
-                ->get();
-        }
-    }
-
+    /**
+     * Show the form for editing the specified resource.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
     public function edit($id)
     {
-        $role = Role::firstOrCreate(['id' => Auth::user()->role_id]);
-        if ($role->hasPermissionTo('products-edit')) {
-            $lims_product_list_without_variant = $this->productWithoutVariant();
-            $lims_product_list_with_variant = $this->productWithVariant();
-            $lims_brand_list = Brand::where('is_active', true)->get();
-            $lims_category_list = Category::where('is_active', true)->get();
-            $lims_unit_list = Unit::where('is_active', true)->get();
-            $lims_tax_list = Tax::where('is_active', true)->get();
-            $lims_product_data = Product::where('id', $id)->first();
-            if($lims_product_data->variant_option) {
-                $lims_product_data->variant_option = json_decode($lims_product_data->variant_option);
-                $lims_product_data->variant_value = json_decode($lims_product_data->variant_value);
-            }
-            $lims_product_variant_data = $lims_product_data->variant()->orderBy('position')->get();
-            $lims_warehouse_list = Warehouse::where('is_active', true)->get();
-            $noOfVariantValue = 0;
-            $custom_fields = CustomField::where('belongs_to', 'product')->get();
-
-            if(in_array('ecommerce', explode(',',config('addons')))) {
-                $product_arr = explode(',',$lims_product_data->related_products);
-                $related_products = DB::table('products')->whereIn('id',$product_arr)->get();
-                return view('backend.product.edit',compact('related_products','lims_product_list_without_variant', 'lims_product_list_with_variant', 'lims_brand_list', 'lims_category_list', 'lims_unit_list', 'lims_tax_list', 'lims_product_data', 'lims_product_variant_data', 'lims_warehouse_list', 'noOfVariantValue', 'custom_fields'));
-            }
-            return view('backend.product.edit',compact('lims_product_list_without_variant', 'lims_product_list_with_variant', 'lims_brand_list', 'lims_category_list', 'lims_unit_list', 'lims_tax_list', 'lims_product_data', 'lims_product_variant_data', 'lims_warehouse_list', 'noOfVariantValue', 'custom_fields'));
+        if (! auth()->user()->can('product.update')) {
+            abort(403, 'Unauthorized action.');
         }
-        else
-            return redirect()->back()->with('not_permitted', 'Sorry! You are not allowed to access this module');
+
+        $business_id = request()->session()->get('user.business_id');
+        $categories = Category::forDropdown($business_id, 'product');
+        $brands = Brands::forDropdown($business_id);
+
+        $tax_dropdown = TaxRate::forBusinessDropdown($business_id, true, true);
+        $taxes = $tax_dropdown['tax_rates'];
+        $tax_attributes = $tax_dropdown['attributes'];
+
+        $barcode_types = $this->barcode_types;
+
+        $product = Product::where('business_id', $business_id)
+                            ->with(['product_locations'])
+                            ->where('id', $id)
+                            ->firstOrFail();
+
+        //Sub-category
+        $sub_categories = [];
+        $sub_categories = Category::where('business_id', $business_id)
+                        ->where('parent_id', $product->category_id)
+                        ->pluck('name', 'id')
+                        ->toArray();
+        $sub_categories = ['' => 'None'] + $sub_categories;
+
+        $default_profit_percent = request()->session()->get('business.default_profit_percent');
+
+        //Get units.
+        $units = Unit::forDropdown($business_id, true);
+        $sub_units = $this->productUtil->getSubUnits($business_id, $product->unit_id, true);
+
+        //Get all business locations
+        $business_locations = BusinessLocation::forDropdown($business_id);
+        //Rack details
+        $rack_details = $this->productUtil->getRackDetails($business_id, $id);
+
+        $selling_price_group_count = SellingPriceGroup::countSellingPriceGroups($business_id);
+
+        $module_form_parts = $this->moduleUtil->getModuleData('product_form_part');
+        $product_types = $this->product_types();
+        $common_settings = session()->get('business.common_settings');
+        $warranties = Warranty::forDropdown($business_id);
+
+        //product screen view from module
+        $pos_module_data = $this->moduleUtil->getModuleData('get_product_screen_top_view');
+
+        $alert_quantity = ! is_null($product->alert_quantity) ? $this->productUtil->num_f($product->alert_quantity, false, null, true) : null;
+
+        return view('product.edit')
+                ->with(compact('categories', 'brands', 'units', 'sub_units', 'taxes', 'tax_attributes', 'barcode_types', 'product', 'sub_categories', 'default_profit_percent', 'business_locations', 'rack_details', 'selling_price_group_count', 'module_form_parts', 'product_types', 'common_settings', 'warranties', 'pos_module_data', 'alert_quantity'));
     }
 
-    public function updateProduct(Request $request)
+    /**
+     * Update the specified resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
+    public function update(Request $request, $id)
     {
-        if(!env('USER_VERIFIED')) {
-            return redirect()->back()->with('not_permitted', 'This feature is disable for demo!');
-        }
-        else {
-            $this->validate($request, [
-                'name' => [
-                    'max:255',
-                    Rule::unique('products')->ignore($request->input('id'))->where(function ($query) {
-                        return $query->where('is_active', 1);
-                    }),
-                ],
-
-                'code' => [
-                    'max:255',
-                    Rule::unique('products')->ignore($request->input('id'))->where(function ($query) {
-                        return $query->where('is_active', 1);
-                    }),
-                ]
-            ]);
-
-            $lims_product_data = Product::findOrFail($request->input('id'));
-            $data = $request->except('image', 'file', 'prev_img');
-            $data['name'] = htmlspecialchars(trim($data['name']), ENT_QUOTES);
-
-
-            if(in_array('ecommerce', explode(',',config('addons')))) {
-                $data['slug'] = Str::slug($data['name'], '-');
-                $data['slug'] = preg_replace('/[^A-Za-z0-9\-]/', '', $data['slug']);
-                $data['slug'] = str_replace( '\/', '/', $data['slug'] );
-                $data['related_products'] = rtrim($request->products, ",");
-
-                if(isset($request->in_stock))
-                    $data['in_stock'] = $request->input('in_stock');
-                else
-                    $data['in_stock'] = 0;
-
-                if(isset($request->is_online))
-                    $data['is_online'] = $request->input('is_online');
-                else
-                    $data['is_online'] = 0;
-            }
-
-            if($data['type'] == 'combo') {
-                $data['product_list'] = implode(",", $data['product_id']);
-                $data['variant_list'] = implode(",", $data['variant_id']);
-                $data['qty_list'] = implode(",", $data['product_qty']);
-                $data['price_list'] = implode(",", $data['unit_price']);
-                //$data['cost'] = $data['unit_id'] = $data['purchase_unit_id'] = $data['sale_unit_id'] = 0;
-            }
-            elseif($data['type'] == 'digital' || $data['type'] == 'service')
-                $data['cost'] = $data['unit_id'] = $data['purchase_unit_id'] = $data['sale_unit_id'] = 0;
-
-            if(!isset($data['featured']))
-                $data['featured'] = 0;
-
-            if(!isset($data['is_embeded']))
-                $data['is_embeded'] = 0;
-
-            if(!isset($data['promotion']))
-                $data['promotion'] = null;
-
-            if(!isset($data['is_batch']))
-                $data['is_batch'] = null;
-
-            if(!isset($data['is_imei']))
-                $data['is_imei'] = null;
-
-            if(!isset($data['is_sync_disable']) && \Schema::hasColumn('products', 'is_sync_disable'))
-                $data['is_sync_disable'] = null;
-            
-            if(isset($data['short_description']))
-                $data['short_description'] = $data['short_description'];
-            $data['product_details'] = str_replace('"', '@', $data['product_details']);
-            if($data['starting_date'])
-                $data['starting_date'] = date('Y-m-d', strtotime($data['starting_date']));
-            if($data['last_date'])
-                $data['last_date'] = date('Y-m-d', strtotime($data['last_date']));
-
-            $previous_images = [];
-            //dealing with previous images
-            if($request->prev_img) {
-                foreach ($request->prev_img as $key => $prev_img) {
-                    if(!in_array($prev_img, $previous_images))
-                        $previous_images[] = $prev_img;
-                }
-                $lims_product_data->image = implode(",", $previous_images);
-                $lims_product_data->save();
-            }
-            else {
-                $lims_product_data->image = null;
-                $lims_product_data->save();
-            }
-
-            //dealing with new images
-            if ($request->image) {
-                // Ensure the necessary directories exist using public_path()
-                if (!file_exists(public_path("images/product/xlarge")) && !is_dir(public_path("images/product/xlarge"))) {
-                    mkdir(public_path("images/product/xlarge"), 0755, true);
-                }
-                if (!file_exists(public_path("images/product/large")) && !is_dir(public_path("images/product/large"))) {
-                    mkdir(public_path("images/product/large"), 0755, true);
-                }
-                if (!file_exists(public_path("images/product/medium")) && !is_dir(public_path("images/product/medium"))) {
-                    mkdir(public_path("images/product/medium"), 0755, true);
-                }
-                if (!file_exists(public_path("images/product/small")) && !is_dir(public_path("images/product/small"))) {
-                    mkdir(public_path("images/product/small"), 0755, true);
-                }
-
-                $images = $request->image;
-                $image_names = [];
-                $length = count(explode(",", $lims_product_data->image));
-
-                foreach ($images as $key => $image) {
-                    $ext = pathinfo($image->getClientOriginalName(), PATHINFO_EXTENSION);
-
-                    if (!config('database.connections.saleprosaas_landlord')) {
-                        $imageName = date("Ymdhis") . ($length + $key + 1) . '.' . $ext;
-                    } else {
-                        $imageName = $this->getTenantId() . '_' . date("Ymdhis") . ($length + $key + 1) . '.' . $ext;
-                    }
-
-                    $image->move(public_path('images/product'), $imageName);
-
-                    $manager = new ImageManager(Driver::class);
-                    $image = $manager->read(public_path('images/product/'). $imageName);
-
-                    $image->cover(1000, 1250)->save(public_path('images/product/xlarge/'). $imageName, 100);
-
-                    $image->cover(500, 500)->save(public_path('images/product/large/'). $imageName, 100);
-
-                    $image->cover(250, 250)->save(public_path('images/product/medium/' . $imageName), 100);
-
-                    $image->cover(100, 100)->save(public_path('images/product/small/' . $imageName), 100);
-
-                    $image_names[] = $imageName;
-                }
-
-                // Append or set the image field with the new image names
-                if($lims_product_data->image)
-                    $data['image'] = $lims_product_data->image. ',' . implode(",", $image_names);
-                else
-                    $data['image'] = implode(",", $image_names);
-            }
-            else
-                $data['image'] = $lims_product_data->image;
-
-            $file = $request->file;
-            if ($file) {
-                $ext = pathinfo($file->getClientOriginalName(), PATHINFO_EXTENSION);
-                $fileName = strtotime(date('Y-m-d H:i:s'));
-                $fileName = $fileName . '.' . $ext;
-                $file->move(public_path('product/files'), $fileName);
-                $data['file'] = $fileName;
-            }
-
-            $old_product_variant_ids = ProductVariant::where('product_id', $request->input('id'))->pluck('id')->toArray();
-            $new_product_variant_ids = [];
-            //dealing with product variant
-            if(isset($data['is_variant'])) {
-                if(isset($data['variant_option']) && isset($data['variant_value'])) {
-                    $data['variant_option'] = json_encode(array_unique($data['variant_option']));
-                    $data['variant_value'] = json_encode(array_unique($data['variant_value']));
-                }
-                foreach ($data['variant_name'] as $key => $variant_name) {
-                    $lims_variant_data = Variant::firstOrCreate(['name' => $data['variant_name'][$key]]);
-                    $lims_product_variant_data = ProductVariant::where([
-                                                    ['product_id', $lims_product_data->id],
-                                                    ['variant_id', $lims_variant_data->id]
-                                                ])->first();
-                    if($lims_product_variant_data) {
-                        $lims_product_variant_data->update([
-                            'position' => $key+1,
-                            'item_code' => $data['item_code'][$key],
-                            'additional_cost' => $data['additional_cost'][$key],
-                            'additional_price' => $data['additional_price'][$key]
-                        ]);
-                    }
-                    else {
-                        $lims_product_variant_data = ProductVariant::firstOrNew([
-                            'product_id' => $lims_product_data->id,
-                            'variant_id' => $lims_variant_data->id,
-                            'item_code' => $data['item_code'][$key],
-                            'additional_cost' => $data['additional_cost'][$key],
-                            'additional_price' => $data['additional_price'][$key],
-                            'qty' => 0,
-                        ]);
-                        $lims_product_variant_data->position = $key + 1;
-                        $lims_product_variant_data->save();
-                    }
-                    $new_product_variant_ids[] = $lims_product_variant_data->id;
-                }
-            }
-            else {
-                $data['is_variant'] = null;
-                $data['variant_option'] = null;
-                $data['variant_value'] = null;
-            }
-            //deleting old product variant if not exist
-            foreach ($old_product_variant_ids as $key => $product_variant_id) {
-                if (!in_array($product_variant_id, $new_product_variant_ids))
-                    ProductVariant::find($product_variant_id)->delete();
-            }
-            if(isset($data['is_diffPrice'])) {
-                foreach ($data['diff_price'] as $key => $diff_price) {
-                    if($diff_price) {
-                        $lims_product_warehouse_data = Product_Warehouse::FindProductWithoutVariant($lims_product_data->id, $data['warehouse_id'][$key])->first();
-                        if($lims_product_warehouse_data) {
-                            $lims_product_warehouse_data->price = $diff_price;
-                            $lims_product_warehouse_data->save();
-                        }
-                        else {
-                            Product_Warehouse::firstOrCreate([
-                                "product_id" => $lims_product_data->id,
-                                "warehouse_id" => $data["warehouse_id"][$key],
-                                "qty" => 0,
-                                "price" => $diff_price
-                            ]);
-                        }
-                    }
-                }
-            }
-            else {
-                $data['is_diffPrice'] = false;
-                if(isset($data['warehouse_id'])){
-                    foreach ($data['warehouse_id'] as $key => $warehouse_id) {
-                        $lims_product_warehouse_data = Product_Warehouse::FindProductWithoutVariant($lims_product_data->id, $warehouse_id)->first();
-                        if($lims_product_warehouse_data) {
-                            $lims_product_warehouse_data->price = null;
-                            $lims_product_warehouse_data->save();
-                        }
-                    }
-                }
-            }
-            $lims_product_data->update($data);
-            //inserting data for custom fields
-            $custom_field_data = [];
-            $custom_fields = CustomField::where('belongs_to', 'product')->select('name', 'type')->get();
-            foreach ($custom_fields as $type => $custom_field) {
-                $field_name = str_replace(' ', '_', strtolower($custom_field->name));
-                if(isset($data[$field_name])) {
-                    if($custom_field->type == 'checkbox' || $custom_field->type == 'multi_select')
-                        $custom_field_data[$field_name] = implode(",", $data[$field_name]);
-                    else
-                        $custom_field_data[$field_name] = $data[$field_name];
-                }
-            }
-            if(count($custom_field_data))
-                DB::table('products')->where('id', $lims_product_data->id)->update($custom_field_data);
-            $this->cacheForget('product_list');
-            $this->cacheForget('product_list_with_variant');
-            \Session::flash('edit_message', 'Product updated successfully');
-        }
-    }
-
-    public function generateCode()
-    {
-        $id = Keygen::numeric(8)->generate();
-        return $id;
-    }
-
-    public function search(Request $request)
-    {
-        $product_code = explode(" (", $request['data']);
-        $lims_product_data = Product::where('code', $product_code[0])->first();
-
-        $product[] = $lims_product_data->name;
-        $product[] = $lims_product_data->code;
-        $product[] = $lims_product_data->qty;
-        $product[] = $lims_product_data->price;
-        $product[] = $lims_product_data->id;
-        return $product;
-    }
-
-    public function saleUnit($id)
-    {
-        $unit = Unit::where("base_unit", $id)->orWhere('id', $id)->pluck('unit_name','id');
-        return json_encode($unit);
-    }
-
-    public function getData($id, $variant_id)
-    {
-        if($variant_id) {
-            $data = Product::join('product_variants', 'products.id', 'product_variants.product_id')
-                ->select('products.name', 'product_variants.item_code')
-                ->where([
-                    ['products.id', $id],
-                    ['product_variants.variant_id', $variant_id]
-                ])->first();
-            $data->code = $data->item_code;
-        }
-        else
-            $data = Product::select('name', 'code')->find($id);
-        return $data;
-    }
-
-    public function productWarehouseData($id)
-    {
-        $warehouse = [];
-        $qty = [];
-        $batch = [];
-        $expired_date = [];
-        $imei_number = [];
-        $warehouse_name = [];
-        $variant_name = [];
-        $variant_qty = [];
-        $product_warehouse = [];
-        $product_variant_warehouse = [];
-        $lims_product_data = Product::select('id', 'is_variant')->find($id);
-        if($lims_product_data->is_variant) {
-            $lims_product_variant_warehouse_data = Product_Warehouse::where('product_id', $lims_product_data->id)->orderBy('warehouse_id')->get();
-            $lims_product_warehouse_data = Product_Warehouse::select('warehouse_id', DB::raw('sum(qty) as qty'))->where('product_id', $id)->groupBy('warehouse_id')->get();
-            foreach ($lims_product_variant_warehouse_data as $key => $product_variant_warehouse_data) {
-                $lims_warehouse_data = Warehouse::find($product_variant_warehouse_data->warehouse_id);
-                $lims_variant_data = Variant::find($product_variant_warehouse_data->variant_id);
-                $warehouse_name[] = $lims_warehouse_data->name;
-                $variant_name[] = $lims_variant_data->name;
-                $variant_qty[] = $product_variant_warehouse_data->qty;
-            }
-        }
-        else {
-            $lims_product_warehouse_data = Product_Warehouse::where('product_id', $id)->orderBy('warehouse_id', 'asc')->get();
-        }
-        foreach ($lims_product_warehouse_data as $key => $product_warehouse_data) {
-            $lims_warehouse_data = Warehouse::find($product_warehouse_data->warehouse_id);
-            if($product_warehouse_data->product_batch_id) {
-                $product_batch_data = ProductBatch::select('batch_no', 'expired_date')->find($product_warehouse_data->product_batch_id);
-                $batch_no = $product_batch_data->batch_no;
-                $expiredDate = date(config('date_format'), strtotime($product_batch_data->expired_date));
-            }
-            else {
-                $batch_no = 'N/A';
-                $expiredDate = 'N/A';
-            }
-            $warehouse[] = $lims_warehouse_data->name;
-            $batch[] = $batch_no;
-            $expired_date[] = $expiredDate;
-            $qty[] = $product_warehouse_data->qty;
-            if($product_warehouse_data->imei_number && !str_contains($product_warehouse_data->imei_number, 'null'))
-                $imei_number[] = $product_warehouse_data->imei_number;
-            else
-                $imei_number[] = 'N/A';
+        if (! auth()->user()->can('product.update')) {
+            abort(403, 'Unauthorized action.');
         }
 
-        $product_warehouse = [$warehouse, $qty, $batch, $expired_date, $imei_number];
-        $product_variant_warehouse = [$warehouse_name, $variant_name, $variant_qty];
-        return ['product_warehouse' => $product_warehouse, 'product_variant_warehouse' => $product_variant_warehouse];
-    }
-
-    public function printBarcode(Request $request)
-    {
-        //return $request;
-        if($request->input('data')) {
-            $preLoadedproducts = $this->limsProductSearch($request);
-            //return $this->limsProductSearch($request);
-        }
-        else
-            $preLoadedproducts = [];
-
-        $lims_product_list_without_variant = $this->productWithoutVariant();
-        $lims_product_list_with_variant = $this->productWithVariant();
-
-        $barcode_settings = Barcode::select(DB::raw('CONCAT(name, ", ", COALESCE(description, "")) as name, id, is_default'))->get();
-        $default = $barcode_settings->where('is_default', 1)->first();
-        $barcode_settings = $barcode_settings->pluck('name', 'id');
-
-        return view('backend.product.print_barcode', compact('barcode_settings','lims_product_list_without_variant', 'lims_product_list_with_variant', 'preLoadedproducts'));
-    }
-
-    public function productWithoutVariant()
-    {
-        return Product::ActiveStandard()->select('id', 'name', 'code')
-                ->whereNull('is_variant')->get();
-    }
-
-    public function productWithVariant()
-    {
-        return Product::join('product_variants', 'products.id', 'product_variants.product_id')
-                ->ActiveStandard()
-                ->whereNotNull('is_variant')
-                ->select('products.id', 'products.name', 'product_variants.item_code')
-                ->orderBy('position')->get();
-    }
-
-    public function limsProductSearch(Request $request)
-    {
-        $product_code = explode("(", $request['data']);
-        $product_code[0] = rtrim($product_code[0], " ");
-        $lims_product_list = Product::where([
-            ['code', $product_code[0] ],
-            ['is_active', true]
-        ])->get();
-
-        if(count($lims_product_list) == 0) {
-            $lims_product_list = Product::join('product_variants', 'products.id', 'product_variants.product_id')
-                ->select('products.*', 'product_variants.item_code', 'product_variants.variant_id', 'product_variants.additional_price')
-                ->where('product_variants.item_code', $product_code[0])
-                ->get();
-        }
-        elseif($lims_product_list[0]->is_variant) {
-            $lims_product_list = Product::join('product_variants', 'products.id', 'product_variants.product_id')
-                ->select('products.*', 'product_variants.item_code', 'product_variants.variant_id', 'product_variants.additional_price')
-                ->where('product_variants.product_id', $lims_product_list[0]->id)
-                ->get();
-        }
-        //return $lims_product_list;
-        foreach($lims_product_list as $lims_product_data) {
-            $product = [];
-            $product[] = $lims_product_data->name;
-            if($lims_product_data->is_variant) {
-                $product[] = $lims_product_data->item_code;
-                $variant_id = $lims_product_data->variant_id;
-                $additional_price = $lims_product_data->additional_price;
-            }
-            else {
-                $product[] = $lims_product_data->code;
-                $variant_id = '';
-                $additional_price = 0;
-            }
-
-            $product[] = $lims_product_data->price + $additional_price;
-            $product[] = DNS1D::getBarcodePNG($product[1], $lims_product_data->barcode_symbology);
-            $product[] = $lims_product_data->promotion_price;
-            $product[] = config('currency');
-            $product[] = config('currency_position');
-            $product[] = $lims_product_data->qty;
-            $product[] = $lims_product_data->id;
-            $product[] = $variant_id;
-            $product[] = $lims_product_data->cost;
-            $products[] = $product;
-        }
-        return $products;
-    }
-
-    /*public function getBarcode()
-    {
-        return DNS1D::getBarcodePNG('72782608', 'C128');
-    }*/
-
-    public function checkBatchAvailability($product_id, $batch_no, $warehouse_id)
-    {
-        $product_batch_data = ProductBatch::where([
-            ['product_id', $product_id],
-            ['batch_no', $batch_no]
-        ])->first();
-        if($product_batch_data) {
-            $product_warehouse_data = Product_Warehouse::select('qty')
-            ->where([
-                ['product_batch_id', $product_batch_data->id],
-                ['warehouse_id', $warehouse_id]
-            ])->first();
-            if($product_warehouse_data) {
-                $data['qty'] = $product_warehouse_data->qty;
-                $data['product_batch_id'] = $product_batch_data->id;
-                $data['expired_date'] = date(config('date_format'), strtotime($product_batch_data->expired_date));
-                $data['message'] = 'ok';
-            }
-            else {
-                $data['qty'] = 0;
-                $data['message'] = 'This Batch does not exist in the selected warehouse!';
-            }
-        }
-        else {
-            $data['message'] = 'Wrong Batch Number!';
-        }
-        return $data;
-    }
-
-    public function importProduct(Request $request)
-    {
-        // Get file
-        $upload = $request->file('file');
-        $ext = pathinfo($upload->getClientOriginalName(), PATHINFO_EXTENSION);
-        if ($ext != 'csv') {
-            return redirect()->back()->with('message', 'Please upload a valid CSV file.');
-        }
-
-        $filePath = $upload->getRealPath();
-
-        // Open and read file
-        $file = fopen($filePath, 'r');
-        $header = fgetcsv($file);
-        if (!$header) {
-            fclose($file);
-            return redirect()->back()->with('message', 'CSV file is empty or invalid.');
-        }
-
-        $escapedHeader = [];
-        foreach ($header as $key => $value) {
-            $lheader = strtolower(trim($value));
-            $escapedItem = preg_replace('/[^a-z]/', '', $lheader);
-            $escapedHeader[] = $escapedItem;
-        }
-
-        // Looping through other columns
         try {
-            while ($columns = fgetcsv($file)) {
-                if (count($escapedHeader) !== count($columns)) {
-                    fclose($file);
-                    return redirect()->back()->with('message', 'CSV file format is incorrect.');
-                }
+            $business_id = $request->session()->get('user.business_id');
+            $product_details = $request->only(['name', 'brand_id', 'unit_id', 'category_id', 'tax', 'barcode_type', 'sku', 'alert_quantity', 'tax_type', 'weight', 'product_description', 'sub_unit_ids', 'preparation_time_in_minutes', 'product_custom_field1', 'product_custom_field2', 'product_custom_field3', 'product_custom_field4', 'product_custom_field5', 'product_custom_field6', 'product_custom_field7', 'product_custom_field8', 'product_custom_field9', 'product_custom_field10', 'product_custom_field11', 'product_custom_field12', 'product_custom_field13', 'product_custom_field14', 'product_custom_field15', 'product_custom_field16', 'product_custom_field17', 'product_custom_field18', 'product_custom_field19', 'product_custom_field20',]);
 
-                $data = array_combine($escapedHeader, $columns);
+            DB::beginTransaction();
 
-                // Validate and sanitize input
-                $data['name'] = htmlspecialchars(trim($data['name']));
-                $data['cost'] = is_numeric($data['cost']) ? str_replace(",", "", $data['cost']) : 0;
-                $data['price'] = is_numeric($data['price']) ? str_replace(",", "", $data['price']) : 0;
+            $product = Product::where('business_id', $business_id)
+                                ->where('id', $id)
+                                ->with(['product_variations'])
+                                ->first();
 
-                // Handle brand
-                $brand_id = null;
-                if (isset($data['brand']) && $data['brand'] !== 'N/A' && $data['brand'] !== '') {
-                    $lims_brand_data = Brand::firstOrCreate(['title' => $data['brand'], 'is_active' => true]);
-                    $brand_id = $lims_brand_data->id;
-                }
-
-                // Handle category
-                $lims_category_data = Category::firstOrCreate(['name' => $data['category'], 'is_active' => true]);
-
-                // Handle unit
-                $lims_unit_data = Unit::where('unit_code', $data['unitcode'])->first();
-                if (!$lims_unit_data) {
-                    fclose($file);
-                    return redirect()->back()->with('not_permitted', 'Unit code does not exist in the database.');
-                }
-
-                // Create or update product
-                $product = Product::firstOrNew([
-                    'name' => $data['name'],
-                    'is_active' => true
-                ]);
-
-                $product->fill([
-                    'code' => $data['code'],
-                    'type' => strtolower($data['type']),
-                    'barcode_symbology' => 'C128',
-                    'brand_id' => $brand_id,
-                    'category_id' => $lims_category_data->id,
-                    'unit_id' => $lims_unit_data->id,
-                    'purchase_unit_id' => $lims_unit_data->id,
-                    'sale_unit_id' => $lims_unit_data->id,
-                    'cost' => $data['cost'],
-                    'price' => $data['price'],
-                    'tax_method' => 1,
-                    'qty' => 0,
-                    'product_details' => $data['productdetails'] ?? '',
-                    'is_active' => true,
-                    'image' => $data['image'] ?? 'zummXD2dvAtI.png',
-                ]);
-
-                if (in_array('ecommerce', explode(',', config('addons')))) {
-                    $data['slug'] = Str::slug($data['name'], '-');
-                    $product->slug = preg_replace('/[^A-Za-z0-9\-]/', '', $data['slug']);
-                    $product->in_stock = true;
-                }
-
-                $product->save();
-
-                // Handle variants
-                $warehouse_ids = Warehouse::where('is_active', true)->pluck('id');
-                if (!empty($data['variantvalue']) && !empty($data['variantname'])) {
-                    $variant_option = [];
-                    $variant_value = [];
-                    $variantInfo = explode(",", $data['variantvalue']);
-
-                    foreach ($variantInfo as $key => $info) {
-                        if (!strpos($info, "[")) {
-                            fclose($file);
-                            return redirect()->back()->with('message', 'Invalid variant value format.');
-                        }
-                        $variant_option[] = strtok($info, "[");
-                        $variant_value[] = str_replace("/", ",", substr($info, strpos($info, "[") + 1, (strpos($info, "]") - strpos($info, "[") - 1)));
-                    }
-
-                    $product->variant_option = json_encode($variant_option);
-                    $product->variant_value = json_encode($variant_value);
-                    $product->is_variant = true;
-                    $product->save();
-
-                    $variant_names = explode(",", $data['variantname']);
-                    $item_codes = explode(",", $data['itemcode']);
-                    $additional_costs = explode(",", $data['additionalcost']);
-                    $additional_prices = explode(",", $data['additionalprice']);
-
-                    $productVariants = [];
-                    $productWarehouses = [];
-
-                    foreach ($variant_names as $key => $variant_name) {
-                        $variant = Variant::firstOrCreate(['name' => $variant_name]);
-
-                        $productVariants[] = [
-                            'product_id' => $product->id,
-                            'variant_id' => $variant->id,
-                            'position' => $key + 1,
-                            'item_code' => $item_codes[$key] ?? $variant_name . '-' . $data['code'],
-                            'additional_cost' => $additional_costs[$key] ?? 0,
-                            'additional_price' => $additional_prices[$key] ?? 0,
-                            'qty' => 0,
-                        ];
-
-                        foreach ($warehouse_ids as $warehouse_id) {
-                            $productWarehouses[] = [
-                                'product_id' => $product->id,
-                                'variant_id' => $variant->id,
-                                'warehouse_id' => $warehouse_id,
-                                'qty' => 0,
-                            ];
-                        }
-                    }
-
-                    ProductVariant::insert($productVariants);
-                    if (config('without_stock') === 'yes') {
-                        Product_Warehouse::insert($productWarehouses);
-                    }
-                } elseif (config('without_stock') === 'yes') {
-                    $productWarehouses = [];
-                    foreach ($warehouse_ids as $warehouse_id) {
-                        $productWarehouses[] = [
-                            'product_id' => $product->id,
-                            'warehouse_id' => $warehouse_id,
-                            'qty' => 0,
-                        ];
-                    }
-                    Product_Warehouse::insert($productWarehouses);
+            $module_form_fields = $this->moduleUtil->getModuleFormField('product_form_fields');
+            if (! empty($module_form_fields)) {
+                foreach ($module_form_fields as $column) {
+                    $product->$column = $request->input($column);
                 }
             }
 
-            fclose($file);
-            $this->cacheForget('product_list');
-            $this->cacheForget('product_list_with_variant');
-            return redirect('products')->with('import_message', 'Products imported successfully!');
+            $product->name = $product_details['name'];
+            $product->brand_id = $product_details['brand_id'];
+            $product->unit_id = $product_details['unit_id'];
+            $product->category_id = $product_details['category_id'];
+            $product->tax = $product_details['tax'];
+            $product->barcode_type = $product_details['barcode_type'];
+            $product->sku = $product_details['sku'];
+            $product->alert_quantity = ! empty($product_details['alert_quantity']) ? $this->productUtil->num_uf($product_details['alert_quantity']) : $product_details['alert_quantity'];
+            $product->tax_type = $product_details['tax_type'];
+            $product->weight = $product_details['weight'];
+            $product->product_custom_field1 = $product_details['product_custom_field1'] ?? '';
+            $product->product_custom_field2 = $product_details['product_custom_field2'] ?? '';
+            $product->product_custom_field3 = $product_details['product_custom_field3'] ?? '';
+            $product->product_custom_field4 = $product_details['product_custom_field4'] ?? '';
+            $product->product_custom_field5 = $product_details['product_custom_field5'] ?? '';
+            $product->product_custom_field6 = $product_details['product_custom_field6'] ?? '';
+            $product->product_custom_field7 = $product_details['product_custom_field7'] ?? '';
+            $product->product_custom_field8 = $product_details['product_custom_field8'] ?? '';
+            $product->product_custom_field9 = $product_details['product_custom_field9'] ?? '';
+            $product->product_custom_field10 = $product_details['product_custom_field10'] ?? '';
+            $product->product_custom_field11 = $product_details['product_custom_field11'] ?? '';
+            $product->product_custom_field12 = $product_details['product_custom_field12'] ?? '';
+            $product->product_custom_field13 = $product_details['product_custom_field13'] ?? '';
+            $product->product_custom_field14 = $product_details['product_custom_field14'] ?? '';
+            $product->product_custom_field15 = $product_details['product_custom_field15'] ?? '';
+            $product->product_custom_field16 = $product_details['product_custom_field16'] ?? '';
+            $product->product_custom_field17 = $product_details['product_custom_field17'] ?? '';
+            $product->product_custom_field18 = $product_details['product_custom_field18'] ?? '';
+            $product->product_custom_field19 = $product_details['product_custom_field19'] ?? '';
+            $product->product_custom_field20 = $product_details['product_custom_field20'] ?? '';
+
+            $product->product_description = $product_details['product_description'];
+            $product->sub_unit_ids = ! empty($product_details['sub_unit_ids']) ? $product_details['sub_unit_ids'] : null;
+            $product->preparation_time_in_minutes = $product_details['preparation_time_in_minutes'];
+            $product->warranty_id = ! empty($request->input('warranty_id')) ? $request->input('warranty_id') : null;
+            $product->secondary_unit_id = ! empty($request->input('secondary_unit_id')) ? $request->input('secondary_unit_id') : null;
+
+            if (! empty($request->input('enable_stock')) && $request->input('enable_stock') == 1) {
+                $product->enable_stock = 1;
+            } else {
+                $product->enable_stock = 0;
+            }
+
+            $product->not_for_selling = (! empty($request->input('not_for_selling')) && $request->input('not_for_selling') == 1) ? 1 : 0;
+
+            if (! empty($request->input('sub_category_id'))) {
+                $product->sub_category_id = $request->input('sub_category_id');
+            } else {
+                $product->sub_category_id = null;
+            }
+
+            $expiry_enabled = $request->session()->get('business.enable_product_expiry');
+            if (! empty($expiry_enabled)) {
+                if (! empty($request->input('expiry_period_type')) && ! empty($request->input('expiry_period')) && ($product->enable_stock == 1)) {
+                    $product->expiry_period_type = $request->input('expiry_period_type');
+                    $product->expiry_period = $this->productUtil->num_uf($request->input('expiry_period'));
+                } else {
+                    $product->expiry_period_type = null;
+                    $product->expiry_period = null;
+                }
+            }
+
+            if (! empty($request->input('enable_sr_no')) && $request->input('enable_sr_no') == 1) {
+                $product->enable_sr_no = 1;
+            } else {
+                $product->enable_sr_no = 0;
+            }
+
+            //upload document
+            $file_name = $this->productUtil->uploadFile($request, 'image', config('constants.product_img_path'), 'image');
+            if (! empty($file_name)) {
+
+                //If previous image found then remove
+                if (! empty($product->image_path) && file_exists($product->image_path)) {
+                    unlink($product->image_path);
+                }
+
+                $product->image = $file_name;
+                //If product image is updated update woocommerce media id
+                if (! empty($product->woocommerce_media_id)) {
+                    $product->woocommerce_media_id = null;
+                }
+            }
+
+            $product->save();
+            $product->touch();
+
+            event(new ProductsCreatedOrModified($product, 'updated'));
+
+            //Add product locations
+            $product_locations = ! empty($request->input('product_locations')) ?
+                                $request->input('product_locations') : [];
+
+            $permitted_locations = auth()->user()->permitted_locations();
+            //If not assigned location exists don't remove it
+            if ($permitted_locations != 'all') {
+                $existing_product_locations = $product->product_locations()->pluck('id');
+
+                foreach ($existing_product_locations as $pl) {
+                    if (! in_array($pl, $permitted_locations)) {
+                        $product_locations[] = $pl;
+                    }
+                }
+            }
+
+            $product->product_locations()->sync($product_locations);
+
+            if ($product->type == 'single') {
+                $single_data = $request->only(['single_variation_id', 'single_dpp', 'single_dpp_inc_tax', 'single_dsp_inc_tax', 'profit_percent', 'single_dsp']);
+                $variation = Variation::find($single_data['single_variation_id']);
+
+                $variation->sub_sku = $product->sku;
+                $variation->default_purchase_price = $this->productUtil->num_uf($single_data['single_dpp']);
+                $variation->dpp_inc_tax = $this->productUtil->num_uf($single_data['single_dpp_inc_tax']);
+                $variation->profit_percent = $this->productUtil->num_uf($single_data['profit_percent']);
+                $variation->default_sell_price = $this->productUtil->num_uf($single_data['single_dsp']);
+                $variation->sell_price_inc_tax = $this->productUtil->num_uf($single_data['single_dsp_inc_tax']);
+                $variation->save();
+
+                Media::uploadMedia($product->business_id, $variation, $request, 'variation_images');
+            } elseif ($product->type == 'variable') {
+                //Update existing variations
+                $input_variations_edit = $request->get('product_variation_edit');
+                if (! empty($input_variations_edit)) {
+                    $this->productUtil->updateVariableProductVariations($product->id, $input_variations_edit,$request->input('sku_type'));
+                }
+
+                //Add new variations created.
+                $input_variations = $request->input('product_variation');
+                if (! empty($input_variations)) {
+                    $this->productUtil->createVariableProductVariations($product->id, $input_variations, $request->input('sku_type'));
+                }
+            } elseif ($product->type == 'combo') {
+
+                //Create combo_variations array by combining variation_id and quantity.
+                $combo_variations = [];
+                if (! empty($request->input('composition_variation_id'))) {
+                    $composition_variation_id = $request->input('composition_variation_id');
+                    $quantity = $request->input('quantity');
+                    $unit = $request->input('unit');
+
+                    foreach ($composition_variation_id as $key => $value) {
+                        $combo_variations[] = [
+                            'variation_id' => $value,
+                            'quantity' => $quantity[$key],
+                            'unit_id' => $unit[$key],
+                        ];
+                    }
+                }
+
+                $variation = Variation::find($request->input('combo_variation_id'));
+                $variation->sub_sku = $product->sku;
+                $variation->default_purchase_price = $this->productUtil->num_uf($request->input('item_level_purchase_price_total'));
+                $variation->dpp_inc_tax = $this->productUtil->num_uf($request->input('purchase_price_inc_tax'));
+                $variation->profit_percent = $this->productUtil->num_uf($request->input('profit_percent'));
+                $variation->default_sell_price = $this->productUtil->num_uf($request->input('selling_price'));
+                $variation->sell_price_inc_tax = $this->productUtil->num_uf($request->input('selling_price_inc_tax'));
+                $variation->combo_variations = $combo_variations;
+                $variation->save();
+            }
+
+            //Add product racks details.
+            $product_racks = $request->get('product_racks', null);
+            if (! empty($product_racks)) {
+                $this->productUtil->addRackDetails($business_id, $product->id, $product_racks);
+            }
+
+            $product_racks_update = $request->get('product_racks_update', null);
+            if (! empty($product_racks_update)) {
+                $this->productUtil->updateRackDetails($business_id, $product->id, $product_racks_update);
+            }
+
+            //Set Module fields
+            if (! empty($request->input('has_module_data'))) {
+                $this->moduleUtil->getModuleData('after_product_saved', ['product' => $product, 'request' => $request]);
+            }
+
+            Media::uploadMedia($product->business_id, $product, $request, 'product_brochure', true);
+
+            DB::commit();
+            $output = ['success' => 1,
+                'msg' => __('product.product_updated_success'),
+            ];
         } catch (\Exception $e) {
-            fclose($file);
-            return redirect()->back()->with('message', 'Error: ' . $e->getMessage());
+            DB::rollBack();
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => 0,
+                'msg' => $e->getMessage(),
+            ];
         }
-    }
 
-
-    public function allProductInStock()
-    {
-        if(!in_array('ecommerce',explode(',', config('addons'))))
-            return redirect()->back()->with('not_permitted', 'Please install the ecommerce addon!');
-        Product::where('is_active', true)->update(['in_stock' => true]);
-        return redirect()->back()->with('create_message', 'All Products set to in stock successfully!');
-    }
-
-    public function showAllProductOnline()
-    {
-        if(!in_array('ecommerce',explode(',', config('addons'))))
-            return redirect()->back()->with('not_permitted', 'Please install the ecommerce addon!');
-        Product::where('is_active', true)->update(['is_online' => true]);
-        return redirect()->back()->with('create_message', 'All Products will be showed to online!');
-    }
-
-    public function deleteBySelection(Request $request)
-    {
-        $product_id = $request['productIdArray'];
-        foreach ($product_id as $id) {
-            $lims_product_data = Product::findOrFail($id);
-            $lims_product_data->is_active = false;
-            $lims_product_data->save();
-
-            if($lims_product_data->image) {
-                $images = explode(",", $lims_product_data->image);
-                foreach ($images as $image) {
-                    $this->fileDelete(public_path('images/product/'), $image);
-                }
-            }
+        if ($request->input('submit_type') == 'update_n_edit_opening_stock') {
+            return redirect()->action([\App\Http\Controllers\OpeningStockController::class, 'add'],
+                ['product_id' => $product->id]
+            );
+        } elseif ($request->input('submit_type') == 'submit_n_add_selling_prices') {
+            return redirect()->action([\App\Http\Controllers\ProductController::class, 'addSellingPrices'],
+                [$product->id]
+            );
+        } elseif ($request->input('submit_type') == 'save_n_add_another') {
+            return redirect()->action([\App\Http\Controllers\ProductController::class, 'create']
+            )->with('status', $output);
         }
-        $this->cacheForget('product_list');
-        $this->cacheForget('product_list_with_variant');
-        return 'Product deleted successfully!';
+
+        return redirect('products')->with('status', $output);
     }
 
+    /**
+     * Remove the specified resource from storage.
+     *
+     * @param  \App\Product  $product
+     * @return \Illuminate\Http\Response
+     */
     public function destroy($id)
     {
-        if(!env('USER_VERIFIED')) {
-            return redirect()->back()->with('not_permitted', 'This feature is disable for demo!');
+        if (! auth()->user()->can('product.delete')) {
+            abort(403, 'Unauthorized action.');
         }
-        else {
-            $lims_product_data = Product::findOrFail($id);
-            $lims_product_data->is_active = false;
-            if($lims_product_data->image != 'zummXD2dvAtI.png') {
-                $images = explode(",", $lims_product_data->image);
-                foreach ($images as $key => $image) {
-                    $this->fileDelete(public_path('images/product/'), $image);
-                    $this->fileDelete(public_path('images/product/large/'), $image);
-                    $this->fileDelete(public_path('images/product/medium/'), $image);
-                    $this->fileDelete(public_path('images/product/small/'), $image);
+
+        if (request()->ajax()) {
+            try {
+                $business_id = request()->session()->get('user.business_id');
+
+                $can_be_deleted = true;
+                $error_msg = '';
+
+                //Check if any purchase or transfer exists
+                $count = PurchaseLine::join(
+                    'transactions as T',
+                    'purchase_lines.transaction_id',
+                    '=',
+                    'T.id'
+                )
+                                    ->whereIn('T.type', ['purchase'])
+                                    ->where('T.business_id', $business_id)
+                                    ->where('purchase_lines.product_id', $id)
+                                    ->count();
+                if ($count > 0) {
+                    $can_be_deleted = false;
+                    $error_msg = __('lang_v1.purchase_already_exist');
+                } else {
+                    //Check if any opening stock sold
+                    $count = PurchaseLine::join(
+                        'transactions as T',
+                        'purchase_lines.transaction_id',
+                        '=',
+                        'T.id'
+                     )
+                                    ->where('T.type', 'opening_stock')
+                                    ->where('T.business_id', $business_id)
+                                    ->where('purchase_lines.product_id', $id)
+                                    ->where('purchase_lines.quantity_sold', '>', 0)
+                                    ->count();
+                    if ($count > 0) {
+                        $can_be_deleted = false;
+                        $error_msg = __('lang_v1.opening_stock_sold');
+                    } else {
+                        //Check if any stock is adjusted
+                        $count = PurchaseLine::join(
+                            'transactions as T',
+                            'purchase_lines.transaction_id',
+                            '=',
+                            'T.id'
+                        )
+                                    ->where('T.business_id', $business_id)
+                                    ->where('purchase_lines.product_id', $id)
+                                    ->where('purchase_lines.quantity_adjusted', '>', 0)
+                                    ->count();
+                        if ($count > 0) {
+                            $can_be_deleted = false;
+                            $error_msg = __('lang_v1.stock_adjusted');
+                        }
+                    }
+                }
+
+                $product = Product::where('id', $id)
+                                ->where('business_id', $business_id)
+                                ->with('variations')
+                                ->first();
+
+                // check for enable stock = 0 product
+                if($product->enable_stock == 0){
+                    $t_count = TransactionSellLine::join(
+                        'transactions as T',
+                        'transaction_sell_lines.transaction_id',
+                        '=',
+                        'T.id'
+                    )
+                        ->where('T.business_id', $business_id)
+                        ->where('transaction_sell_lines.product_id', $id)
+                        ->count();
+
+                    if ($t_count > 0) {
+                        $can_be_deleted = false;
+                        $error_msg = "can't delete product exit in sell";
+                    }
+                }
+
+                //Check if product is added as an ingredient of any recipe
+                if ($this->moduleUtil->isModuleInstalled('Manufacturing')) {
+                    $variation_ids = $product->variations->pluck('id');
+
+                    $exists_as_ingredient = \Modules\Manufacturing\Entities\MfgRecipeIngredient::whereIn('variation_id', $variation_ids)
+                        ->exists();
+                    if ($exists_as_ingredient) {
+                        $can_be_deleted = false;
+                        $error_msg = __('manufacturing::lang.added_as_ingredient');
+                    }
+                }
+            
+                if ($can_be_deleted) {
+                    if (! empty($product)) {
+                        DB::beginTransaction();
+                        //Delete variation location details
+                        VariationLocationDetails::where('product_id', $id)
+                                                ->delete();
+                        //Detach product locations pivot
+                        $product->product_locations()->detach();
+                        //Delete rack details
+                        \App\ProductRack::where('product_id', $id)->delete();
+                        $product->delete();
+                        event(new ProductsCreatedOrModified($product, 'deleted'));
+                        DB::commit();
+                    }
+
+                    $output = ['success' => true,
+                        'msg' => __('lang_v1.product_delete_success'),
+                    ];
+                } else {
+                    $output = ['success' => false,
+                        'msg' => $error_msg,
+                    ];
+                }
+            } catch (\Exception $e) {
+                DB::rollBack();
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
+            }
+
+            return $output;
+        }
+    }
+
+    /**
+     * Get subcategories list for a category.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function getSubCategories(Request $request)
+    {
+        if (! empty($request->input('cat_id'))) {
+            $category_id = $request->input('cat_id');
+            $business_id = $request->session()->get('user.business_id');
+            $sub_categories = Category::where('business_id', $business_id)
+                        ->where('parent_id', $category_id)
+                        ->select(['name', 'id'])
+                        ->get();
+            $html = '<option value="">None</option>';
+            if (! empty($sub_categories)) {
+                foreach ($sub_categories as $sub_category) {
+                    $html .= '<option value="'.$sub_category->id.'">'.$sub_category->name.'</option>';
                 }
             }
-            $lims_product_data->save();
-            $this->cacheForget('product_list');
-            $this->cacheForget('product_list_with_variant');
-            return redirect('products')->with('message', 'Product deleted successfully');
+            echo $html;
+            exit;
         }
+    }
+
+    /**
+     * Get product form parts.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function getProductVariationFormPart(Request $request)
+    {
+        $business_id = $request->session()->get('user.business_id');
+        $business = Business::findorfail($business_id);
+        $profit_percent = $business->default_profit_percent;
+
+        $action = $request->input('action');
+        if ($request->input('action') == 'add') {
+            if ($request->input('type') == 'single') {
+                return view('product.partials.single_product_form_part')
+                        ->with(['profit_percent' => $profit_percent]);
+            } elseif ($request->input('type') == 'variable') {
+                $variation_templates = VariationTemplate::where('business_id', $business_id)->pluck('name', 'id')->toArray();
+                $variation_templates = ['' => __('messages.please_select')] + $variation_templates;
+
+                return view('product.partials.variable_product_form_part')
+                        ->with(compact('variation_templates', 'profit_percent', 'action'));
+            } elseif ($request->input('type') == 'combo') {
+                return view('product.partials.combo_product_form_part')
+                ->with(compact('profit_percent', 'action'));
+            }
+        } elseif ($request->input('action') == 'edit' || $request->input('action') == 'duplicate') {
+            $product_id = $request->input('product_id');
+            $action = $request->input('action');
+            if ($request->input('type') == 'single') {
+                $product_deatails = ProductVariation::where('product_id', $product_id)
+                    ->with(['variations', 'variations.media'])
+                    ->first();
+
+                return view('product.partials.edit_single_product_form_part')
+                            ->with(compact('product_deatails', 'action'));
+            } elseif ($request->input('type') == 'variable') {
+                $product_variations = ProductVariation::where('product_id', $product_id)
+                        ->with(['variations', 'variations.media'])
+                        ->get();
+
+                return view('product.partials.variable_product_form_part')
+                        ->with(compact('product_variations', 'profit_percent', 'action'));
+            } elseif ($request->input('type') == 'combo') {
+                $product_deatails = ProductVariation::where('product_id', $product_id)
+                    ->with(['variations', 'variations.media'])
+                    ->first();
+                $combo_variations = $this->productUtil->__getComboProductDetails($product_deatails['variations'][0]->combo_variations, $business_id);
+
+                $variation_id = $product_deatails['variations'][0]->id;
+                $profit_percent = $product_deatails['variations'][0]->profit_percent;
+
+                return view('product.partials.combo_product_form_part')
+                ->with(compact('combo_variations', 'profit_percent', 'action', 'variation_id'));
+            }
+        }
+    }
+
+    /**
+     * Get product form parts.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function getVariationValueRow(Request $request)
+    {
+        $business_id = $request->session()->get('user.business_id');
+        $business = Business::findorfail($business_id);
+        $profit_percent = $business->default_profit_percent;
+
+        $variation_index = $request->input('variation_row_index');
+        $value_index = $request->input('value_index') + 1;
+
+        $row_type = $request->input('row_type', 'add');
+
+        return view('product.partials.variation_value_row')
+                ->with(compact('profit_percent', 'variation_index', 'value_index', 'row_type'));
+    }
+
+    /**
+     * Get product form parts.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function getProductVariationRow(Request $request)
+    {
+        $business_id = $request->session()->get('user.business_id');
+        $business = Business::findorfail($business_id);
+        $profit_percent = $business->default_profit_percent;
+
+        $variation_templates = VariationTemplate::where('business_id', $business_id)
+                                                ->pluck('name', 'id')->toArray();
+        $variation_templates = ['' => __('messages.please_select')] + $variation_templates;
+
+        $row_index = $request->input('row_index', 0);
+        $action = $request->input('action');
+
+        return view('product.partials.product_variation_row')
+                    ->with(compact('variation_templates', 'row_index', 'action', 'profit_percent'));
+    }
+
+    /**
+     * Get product form parts.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function getVariationTemplate(Request $request)
+    {
+        $business_id = $request->session()->get('user.business_id');
+        $business = Business::findorfail($business_id);
+        $profit_percent = $business->default_profit_percent;
+
+        $template = VariationTemplate::where('id', $request->input('template_id'))
+                                                ->with(['values'])
+                                                ->first();
+        $row_index = $request->input('row_index');
+
+        $values = [];
+        foreach ($template->values as $v) {
+            $values[] = [
+                'id' => $v->id,
+                'text' => $v->name,
+            ];
+        }
+
+        return [
+            'html' => view('product.partials.product_variation_template')
+                    ->with(compact('template', 'row_index', 'profit_percent'))->render(),
+            'values' => $values,
+        ];
+    }
+
+    /**
+     * Return the view for combo product row
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function getComboProductEntryRow(Request $request)
+    {
+        if (request()->ajax()) {
+            $product_id = $request->input('product_id');
+            $variation_id = $request->input('variation_id');
+            $business_id = $request->session()->get('user.business_id');
+
+            if (! empty($product_id)) {
+                $product = Product::where('id', $product_id)
+                        ->with(['unit'])
+                        ->first();
+
+                $query = Variation::where('product_id', $product_id)
+                        ->with(['product_variation']);
+
+                if ($variation_id !== '0') {
+                    $query->where('id', $variation_id);
+                }
+                $variations = $query->get();
+
+                $sub_units = $this->productUtil->getSubUnits($business_id, $product['unit']->id);
+
+                return view('product.partials.combo_product_entry_row')
+                ->with(compact('product', 'variations', 'sub_units'));
+            }
+        }
+    }
+
+    /**
+     * Retrieves products list.
+     *
+     * @param  string  $q
+     * @param  bool  $check_qty
+     * @return JSON
+     */
+    public function getProducts()
+    {
+        if (request()->ajax()) {
+            $search_term = request()->input('term', '');
+            $location_id = request()->input('location_id', null);
+            $check_qty = request()->input('check_qty', false);
+            $price_group_id = request()->input('price_group', null);
+            $business_id = request()->session()->get('user.business_id');
+            $not_for_selling = request()->get('not_for_selling', null);
+            $price_group_id = request()->input('price_group', '');
+            $product_types = request()->get('product_types', []);
+
+            $search_fields = request()->get('search_fields', ['name', 'sku']);
+            if (in_array('sku', $search_fields)) {
+                $search_fields[] = 'sub_sku';
+            }
+
+            $result = $this->productUtil->filterProduct($business_id, $search_term, $location_id, $not_for_selling, $price_group_id, $product_types, $search_fields, $check_qty);
+
+            // If only one result and location_id is provided (POS context), auto-fetch the product row
+            if (count($result) == 1 && !empty($location_id) && request()->get('auto_add_single', false)) {
+                
+                $variation_id = $result[0]->variation_id;
+                        
+                $row_data = $this->productUtil->getPosProductRow($variation_id, $location_id);
+                
+                // Add variation_id to row_data for duplicate checking
+                $row_data['variation_id'] = $variation_id;
+                
+                return json_encode([
+                    'auto_add' => true,
+                    'row_data' => $row_data
+                ]);
+            }
+
+            return json_encode($result);
+        }
+    }
+    /**
+     * Get multiple variation details in a single request
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function getVariationDetailsBulk(Request $request)
+    {
+        if (!request()->ajax()) {
+            abort(404);
+        }
+
+        $business_id = $request->session()->get('user.business_id');
+        $location_id = $request->input('location_id');
+        $ids_param = $request->input('ids', '');
+
+        if (empty($location_id) || empty($ids_param)) {
+            return response()->json([]);
+        }
+
+        // Support both comma separated string or array
+        $variation_ids = is_array($ids_param)
+            ? $ids_param
+            : array_filter(array_map('trim', explode(',', (string) $ids_param)), function ($v) {
+                return $v !== '';
+            });
+
+        $details = [];
+        foreach ($variation_ids as $vid) {
+            try {
+                $product = $this->productUtil->getDetailsFromVariation($vid, $business_id, $location_id, null);
+                $details[$vid] = $product;
+            } catch (\Exception $e) {
+                \Log::warning('Bulk variation detail fetch failed for id: '.$vid.' msg: '.$e->getMessage());
+                $details[$vid] = null;
+            }
+        }
+
+        return response()->json($details);
+    }
+
+    /**
+     * Retrieves products list without variation list
+     *
+     * @param  string  $q
+     * @param  bool  $check_qty
+     * @return JSON
+     */
+    public function getProductsWithoutVariations()
+    {
+        if (request()->ajax()) {
+            $term = request()->input('term', '');
+            //$location_id = request()->input('location_id', '');
+
+            //$check_qty = request()->input('check_qty', false);
+
+            $business_id = request()->session()->get('user.business_id');
+
+            $products = Product::join('variations', 'products.id', '=', 'variations.product_id')
+                ->where('products.business_id', $business_id)
+                ->where('products.type', '!=', 'modifier');
+
+            //Include search
+            if (! empty($term)) {
+                $products->where(function ($query) use ($term) {
+                    $query->where('products.name', 'like', '%'.$term.'%');
+                    $query->orWhere('sku', 'like', '%'.$term.'%');
+                    $query->orWhere('sub_sku', 'like', '%'.$term.'%');
+                });
+            }
+
+            //Include check for quantity
+            // if($check_qty){
+            //     $products->where('VLD.qty_available', '>', 0);
+            // }
+
+            $products = $products->groupBy('products.id')
+                ->select(
+                    'products.id as product_id',
+                    'products.name',
+                    'products.type',
+                    'products.enable_stock',
+                    'products.sku',
+                    'products.id as id',
+                    DB::raw('CONCAT(products.name, " - ", products.sku) as text')
+                )
+                    ->orderBy('products.name')
+                    ->get();
+
+            return json_encode($products);
+        }
+    }
+
+    /**
+     * Checks if product sku already exists.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function checkProductSku(Request $request)
+    {
+        $business_id = $request->session()->get('user.business_id');
+        $sku = $request->input('sku');
+        $product_id = $request->input('product_id');
+
+        //check in products table
+        $query = Product::where('business_id', $business_id)
+                        ->where('sku', $sku);
+        if (! empty($product_id)) {
+            $query->where('id', '!=', $product_id);
+        }
+        $count = $query->count();
+
+        //check in variation table if $count = 0
+        if ($count == 0) {
+            $query2 = Variation::where('sub_sku', $sku)
+                            ->join('products', 'variations.product_id', '=', 'products.id')
+                            ->where('business_id', $business_id);
+
+            if (! empty($product_id)) {
+                $query2->where('product_id', '!=', $product_id);
+            }
+
+            if (! empty($request->input('variation_id'))) {
+                $query2->where('variations.id', '!=', $request->input('variation_id'));
+            }
+            $count = $query2->count();
+        }
+        if ($count == 0) {
+            echo 'true';
+            exit;
+        } else {
+            echo 'false';
+            exit;
+        }
+    }
+
+     /**
+     * Checks if product name already exists.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function checkProductName(Request $request)
+    {
+        $business_id = $request->session()->get('user.business_id');
+        $name = $request->input('name');
+        $product_id = $request->input('product_id');
+
+        //check in products table
+        $query = Product::where('business_id', $business_id)
+                        ->where('name', $name);
+        if (! empty($product_id)) {
+            $query->where('id', '!=', $product_id);
+        }
+        $count = $query->count();
+
+        //check in variation table if $count = 0
+        
+        if ($count == 0) {
+            echo 'true';
+            exit;
+        } else {
+            echo 'false';
+            exit;
+        }
+    }
+
+    /**
+     * Validates multiple variation skus
+     */
+    public function validateVaritionSkus(Request $request)
+    {
+        $business_id = $request->session()->get('user.business_id');
+        $all_skus = $request->input('skus');
+
+        $skus = [];
+        foreach ($all_skus as $key => $value) {
+            $skus[] = $value['sku'];
+        }
+
+        //check product table is sku present
+        $product = Product::where('business_id', $business_id)
+                        ->whereIn('sku', $skus)
+                        ->first();
+
+        if (! empty($product)) {
+            return ['success' => 0, 'sku' => $product->sku];
+        }
+
+        foreach ($all_skus as $key => $value) {
+            $query = Variation::where('sub_sku', $value['sku'])
+                            ->join('products', 'variations.product_id', '=', 'products.id')
+                            ->where('business_id', $business_id);
+
+            if (! empty($value['variation_id'])) {
+                $query->where('variations.id', '!=', $value['variation_id']);
+            }
+            $variation = $query->first();
+
+            if (! empty($variation)) {
+                return ['success' => 0, 'sku' => $variation->sub_sku];
+            }
+        }
+
+        return ['success' => 1];
+    }
+
+    /**
+     * Loads quick add product modal.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function quickAdd()
+    {
+        if (! auth()->user()->can('product.create')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $product_name = ! empty(request()->input('product_name')) ? request()->input('product_name') : '';
+
+        $product_for = ! empty(request()->input('product_for')) ? request()->input('product_for') : null;
+
+        $business_id = request()->session()->get('user.business_id');
+        $categories = Category::forDropdown($business_id, 'product');
+        $brands = Brands::forDropdown($business_id);
+        $units = Unit::forDropdown($business_id, true);
+
+        $tax_dropdown = TaxRate::forBusinessDropdown($business_id, true, true);
+        $taxes = $tax_dropdown['tax_rates'];
+        $tax_attributes = $tax_dropdown['attributes'];
+
+        $barcode_types = $this->barcode_types;
+
+        $default_profit_percent = Business::where('id', $business_id)->value('default_profit_percent');
+
+        $locations = BusinessLocation::forDropdown($business_id);
+
+        $enable_expiry = request()->session()->get('business.enable_product_expiry');
+        $enable_lot = request()->session()->get('business.enable_lot_number');
+
+        $module_form_parts = $this->moduleUtil->getModuleData('product_form_part');
+
+        //Get all business locations
+        $business_locations = BusinessLocation::forDropdown($business_id);
+
+        $common_settings = session()->get('business.common_settings');
+        $warranties = Warranty::forDropdown($business_id);
+
+        return view('product.partials.quick_add_product')
+                ->with(compact('categories', 'brands', 'units', 'taxes', 'barcode_types', 'default_profit_percent', 'tax_attributes', 'product_name', 'locations', 'product_for', 'enable_expiry', 'enable_lot', 'module_form_parts', 'business_locations', 'common_settings', 'warranties'));
+    }
+
+    /**
+     * Store a newly created resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function saveQuickProduct(Request $request)
+    {
+        if (! auth()->user()->can('product.create')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $business_id = $request->session()->get('user.business_id');
+
+        // check for products quota
+        if(! $this->moduleUtil->isQuotaAvailable('products', $business_id)) {
+            return $output = ['success' => 0,
+                'msg' => __('superadmin::lang.max_products'),
+            ];
+        }
+
+        try {
+            $form_fields = ['name', 'brand_id', 'unit_id', 'category_id', 'tax', 'barcode_type', 'tax_type', 'sku',
+                'alert_quantity', 'type', 'sub_unit_ids', 'sub_category_id', 'weight', 'product_description', 'product_custom_field1', 'product_custom_field2', 'product_custom_field3', 'product_custom_field4', 'product_custom_field5', 'product_custom_field6', 'product_custom_field7', 'product_custom_field8', 'product_custom_field9', 'product_custom_field10', 'product_custom_field11', 'product_custom_field12', 'product_custom_field13', 'product_custom_field14', 'product_custom_field15', 'product_custom_field16', 'product_custom_field17', 'product_custom_field18', 'product_custom_field19', 'product_custom_field20'];
+
+            $module_form_fields = $this->moduleUtil->getModuleData('product_form_fields');
+            if (! empty($module_form_fields)) {
+                foreach ($module_form_fields as $key => $value) {
+                    if (! empty($value) && is_array($value)) {
+                        $form_fields = array_merge($form_fields, $value);
+                    }
+                }
+            }
+            $product_details = $request->only($form_fields);
+
+            $product_details['type'] = empty($product_details['type']) ? 'single' : $product_details['type'];
+            $product_details['business_id'] = $business_id;
+            $product_details['created_by'] = $request->session()->get('user.id');
+            if (! empty($request->input('enable_stock')) && $request->input('enable_stock') == 1) {
+                $product_details['enable_stock'] = 1;
+                //TODO: Save total qty
+                //$product_details['total_qty_available'] = 0;
+            }
+            if (! empty($request->input('not_for_selling')) && $request->input('not_for_selling') == 1) {
+                $product_details['not_for_selling'] = 1;
+            }
+            if (empty($product_details['sku'])) {
+                $product_details['sku'] = ' ';
+            }
+
+            if (! empty($product_details['alert_quantity'])) {
+                $product_details['alert_quantity'] = $this->productUtil->num_uf($product_details['alert_quantity']);
+            }
+
+            $expiry_enabled = $request->session()->get('business.enable_product_expiry');
+            if (! empty($request->input('expiry_period_type')) && ! empty($request->input('expiry_period')) && ! empty($expiry_enabled)) {
+                $product_details['expiry_period_type'] = $request->input('expiry_period_type');
+                $product_details['expiry_period'] = $this->productUtil->num_uf($request->input('expiry_period'));
+            }
+
+            if (! empty($request->input('enable_sr_no')) && $request->input('enable_sr_no') == 1) {
+                $product_details['enable_sr_no'] = 1;
+            }
+
+            $product_details['warranty_id'] = ! empty($request->input('warranty_id')) ? $request->input('warranty_id') : null;
+
+            DB::beginTransaction();
+
+            $product = Product::create($product_details);
+            event(new ProductsCreatedOrModified($product_details, 'added'));
+
+            if (empty(trim($request->input('sku')))) {
+                $sku = $this->productUtil->generateProductSku($product->id);
+                $product->sku = $sku;
+                $product->save();
+            }
+
+            $this->productUtil->createSingleProductVariation(
+                $product->id,
+                $product->sku,
+                $request->input('single_dpp'),
+                $request->input('single_dpp_inc_tax'),
+                $request->input('profit_percent'),
+                $request->input('single_dsp'),
+                $request->input('single_dsp_inc_tax')
+            );
+
+            if ($product->enable_stock == 1 && ! empty($request->input('opening_stock'))) {
+                $user_id = $request->session()->get('user.id');
+
+                $transaction_date = $request->session()->get('financial_year.start');
+                $transaction_date = \Carbon::createFromFormat('Y-m-d', $transaction_date)->toDateTimeString();
+
+                $this->productUtil->addSingleProductOpeningStock($business_id, $product, $request->input('opening_stock'), $transaction_date, $user_id);
+            }
+
+            //Add product locations
+            $product_locations = $request->input('product_locations');
+            if (! empty($product_locations)) {
+                $product->product_locations()->sync($product_locations);
+            }
+
+            DB::commit();
+
+            $output = ['success' => 1,
+                'msg' => __('product.product_added_success'),
+                'product' => $product,
+                'variation' => $product->variations->first(),
+                'locations' => $product_locations,
+            ];
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => 0,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+        }
+
+        return $output;
+    }
+
+    /**
+     * Display the specified resource.
+     *
+     * @param  \App\Product  $product
+     * @return \Illuminate\Http\Response
+     */
+    public function view($id)
+    {
+        if (! auth()->user()->can('product.view')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        try {
+            $business_id = request()->session()->get('user.business_id');
+
+            $product = Product::where('business_id', $business_id)
+                        ->with(['brand', 'unit', 'category', 'sub_category', 'product_tax', 'variations', 'variations.product_variation', 'variations.group_prices', 'variations.media', 'product_locations', 'warranty', 'media'])
+                        ->findOrFail($id);
+
+            $price_groups = SellingPriceGroup::where('business_id', $business_id)->active()->pluck('name', 'id');
+
+            $allowed_group_prices = [];
+            foreach ($price_groups as $key => $value) {
+                if (auth()->user()->can('selling_price_group.'.$key)) {
+                    $allowed_group_prices[$key] = $value;
+                }
+            }
+
+            $group_price_details = [];
+
+            foreach ($product->variations as $variation) {
+                foreach ($variation->group_prices as $group_price) {
+                    $group_price_details[$variation->id][$group_price->price_group_id] = ['price' => $group_price->price_inc_tax, 'price_type' => $group_price->price_type, 'calculated_price' => $group_price->calculated_price];
+                }
+            }
+
+            $rack_details = $this->productUtil->getRackDetails($business_id, $id, true);
+
+            $combo_variations = [];
+            if ($product->type == 'combo') {
+                $combo_variations = $this->productUtil->__getComboProductDetails($product['variations'][0]->combo_variations, $business_id);
+            }
+
+            return view('product.view-modal')->with(compact(
+                'product',
+                'rack_details',
+                'allowed_group_prices',
+                'group_price_details',
+                'combo_variations'
+            ));
+        } catch (\Exception $e) {
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+        }
+    }
+
+    /**
+     * Mass deletes products.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function massDestroy(Request $request)
+    {
+        if (! auth()->user()->can('product.delete')) {
+            abort(403, 'Unauthorized action.');
+        }
+        try {
+            $purchase_exist = false;
+
+            if (! empty($request->input('selected_rows'))) {
+                $business_id = $request->session()->get('user.business_id');
+
+                $selected_rows = explode(',', $request->input('selected_rows'));
+
+                $products = Product::where('business_id', $business_id)
+                                    ->whereIn('id', $selected_rows)
+                                    ->with(['purchase_lines', 'variations'])
+                                    ->get();
+                $deletable_products = [];
+
+                $is_mfg_installed = $this->moduleUtil->isModuleInstalled('Manufacturing');
+
+                DB::beginTransaction();
+
+                foreach ($products as $product) {
+                    $can_be_deleted = true;
+                    //Check if product is added as an ingredient of any recipe
+                    if ($is_mfg_installed) {
+                        $variation_ids = $product->variations->pluck('id');
+
+                        $exists_as_ingredient = \Modules\Manufacturing\Entities\MfgRecipeIngredient::whereIn('variation_id', $variation_ids)
+                            ->exists();
+                        $can_be_deleted = ! $exists_as_ingredient;
+                    }
+
+                    //Delete if no purchase found
+                    if (empty($product->purchase_lines->toArray()) && $can_be_deleted) {
+                        //Delete variation location details
+                        VariationLocationDetails::where('product_id', $product->id)
+                                                    ->delete();
+                        //Detach product locations pivot
+                        $product->product_locations()->detach();
+                        //Delete rack details
+                        \App\ProductRack::where('product_id', $product->id)->delete();
+                        $product->delete();
+                        event(new ProductsCreatedOrModified($product, 'Deleted'));
+                    } else {
+                        $purchase_exist = true;
+                    }
+                }
+
+                DB::commit();
+            }
+
+            if (! $purchase_exist) {
+                $output = ['success' => 1,
+                    'msg' => __('lang_v1.deleted_success'),
+                ];
+            } else {
+                $output = ['success' => 0,
+                    'msg' => __('lang_v1.products_could_not_be_deleted'),
+                ];
+            }
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => 0,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+        }
+
+        return redirect()->back()->with(['status' => $output]);
+    }
+
+    /**
+     * Shows form to add selling price group prices for a product.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
+    public function addSellingPrices($id)
+    {
+        if (! auth()->user()->can('product.create')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $business_id = request()->session()->get('user.business_id');
+        $product = Product::where('business_id', $business_id)
+                    ->with(['variations', 'variations.group_prices', 'variations.product_variation'])
+                            ->findOrFail($id);
+
+        $price_groups = SellingPriceGroup::where('business_id', $business_id)
+                                            ->active()
+                                            ->get();
+        $variation_prices = [];
+        foreach ($product->variations as $variation) {
+            foreach ($variation->group_prices as $group_price) {
+                $variation_prices[$variation->id][$group_price->price_group_id] = ['price' => $group_price->price_inc_tax, 'price_type' => $group_price->price_type];
+            }
+        }
+
+        return view('product.add-selling-prices')->with(compact('product', 'price_groups', 'variation_prices'));
+    }
+
+    /**
+     * Saves selling price group prices for a product.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function saveSellingPrices(Request $request)
+    {
+        if (! auth()->user()->can('product.create')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        try {
+            $business_id = $request->session()->get('user.business_id');
+            $product = Product::where('business_id', $business_id)
+                            ->with(['variations'])
+                            ->findOrFail($request->input('product_id'));
+            DB::beginTransaction();
+            foreach ($product->variations as $variation) {
+                $variation_group_prices = [];
+                foreach ($request->input('group_prices') as $key => $value) {
+                    if (isset($value[$variation->id])) {
+                        $variation_group_price =
+                        VariationGroupPrice::where('variation_id', $variation->id)
+                                            ->where('price_group_id', $key)
+                                            ->first();
+                        if (empty($variation_group_price)) {
+                            $variation_group_price = new VariationGroupPrice([
+                                'variation_id' => $variation->id,
+                                'price_group_id' => $key,
+                            ]);
+                        }
+
+                        $variation_group_price->price_inc_tax = $this->productUtil->num_uf($value[$variation->id]['price']);
+                        $variation_group_price->price_type = $value[$variation->id]['price_type'];
+                        $variation_group_prices[] = $variation_group_price;
+                    }
+                }
+
+                if (! empty($variation_group_prices)) {
+                    $variation->group_prices()->saveMany($variation_group_prices);
+                }
+            }
+            //Update product updated_at timestamp
+            $product->touch();
+
+            DB::commit();
+            $output = ['success' => 1,
+                'msg' => __('lang_v1.updated_success'),
+            ];
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => 0,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+        }
+
+        if ($request->input('submit_type') == 'submit_n_add_opening_stock') {
+            return redirect()->action([\App\Http\Controllers\OpeningStockController::class, 'add'],
+                ['product_id' => $product->id]
+            );
+        } elseif ($request->input('submit_type') == 'save_n_add_another') {
+            return redirect()->action([\App\Http\Controllers\ProductController::class, 'create']
+            )->with('status', $output);
+        }
+
+        return redirect('products')->with('status', $output);
+    }
+
+    public function viewGroupPrice($id)
+    {
+        if (! auth()->user()->can('product.view')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $business_id = request()->session()->get('user.business_id');
+
+        $product = Product::where('business_id', $business_id)
+                            ->where('id', $id)
+                            ->with(['variations', 'variations.product_variation', 'variations.group_prices'])
+                            ->first();
+
+        $price_groups = SellingPriceGroup::where('business_id', $business_id)->active()->pluck('name', 'id');
+
+        $allowed_group_prices = [];
+        foreach ($price_groups as $key => $value) {
+            if (auth()->user()->can('selling_price_group.'.$key)) {
+                $allowed_group_prices[$key] = $value;
+            }
+        }
+
+        $group_price_details = [];
+
+        foreach ($product->variations as $variation) {
+            foreach ($variation->group_prices as $group_price) {
+                $group_price_details[$variation->id][$group_price->price_group_id] = $group_price->price_inc_tax;
+            }
+        }
+
+        return view('product.view-product-group-prices')->with(compact('product', 'allowed_group_prices', 'group_price_details'));
+    }
+
+    /**
+     * Mass deactivates products.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function massDeactivate(Request $request)
+    {
+        if (! auth()->user()->can('product.update')) {
+            abort(403, 'Unauthorized action.');
+        }
+        try {
+            if (! empty($request->input('selected_products'))) {
+                $business_id = $request->session()->get('user.business_id');
+
+                $selected_products = explode(',', $request->input('selected_products'));
+
+                DB::beginTransaction();
+
+                $products = Product::where('business_id', $business_id)
+                                    ->whereIn('id', $selected_products)
+                                    ->update(['is_inactive' => 1]);
+
+                DB::commit();
+            }
+
+            $output = ['success' => 1,
+                'msg' => __('lang_v1.products_deactivated_success'),
+            ];
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => 0,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+        }
+
+        return $output;
+    }
+
+    /**
+     * Activates the specified resource from storage.
+     *
+     * @param  \App\Product  $product
+     * @return \Illuminate\Http\Response
+     */
+    public function activate($id)
+    {
+        if (! auth()->user()->can('product.update')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            try {
+                $business_id = request()->session()->get('user.business_id');
+                $product = Product::where('id', $id)
+                                ->where('business_id', $business_id)
+                                ->update(['is_inactive' => 0]);
+
+                $output = ['success' => true,
+                    'msg' => __('lang_v1.updated_success'),
+                ];
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
+            }
+
+            return $output;
+        }
+    }
+
+    /**
+     * Deletes a media file from storage and database.
+     *
+     * @param  int  $media_id
+     * @return json
+     */
+    public function deleteMedia($media_id)
+    {
+        if (! auth()->user()->can('product.update')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            try {
+                $business_id = request()->session()->get('user.business_id');
+
+                Media::deleteMedia($business_id, $media_id);
+
+                $output = ['success' => true,
+                    'msg' => __('lang_v1.file_deleted_successfully'),
+                ];
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
+            }
+
+            return $output;
+        }
+    }
+
+    public function getProductsApi($id = null)
+    {
+        try {
+            $api_token = request()->header('API-TOKEN');
+            $filter_string = request()->header('FILTERS');
+            $order_by = request()->header('ORDER-BY');
+
+            parse_str($filter_string, $filters);
+
+            $api_settings = $this->moduleUtil->getApiSettings($api_token);
+
+            $limit = ! empty(request()->input('limit')) ? request()->input('limit') : 10;
+
+            $location_id = $api_settings->location_id;
+
+            $query = Product::where('business_id', $api_settings->business_id)
+                            ->active()
+                            ->with(['brand', 'unit', 'category', 'sub_category',
+                                'product_variations', 'product_variations.variations', 'product_variations.variations.media',
+                                'product_variations.variations.variation_location_details' => function ($q) use ($location_id) {
+                                    $q->where('location_id', $location_id);
+                                }, ]);
+
+            if (! empty($filters['categories'])) {
+                $query->whereIn('category_id', $filters['categories']);
+            }
+
+            if (! empty($filters['brands'])) {
+                $query->whereIn('brand_id', $filters['brands']);
+            }
+
+            if (! empty($filters['category'])) {
+                $query->where('category_id', $filters['category']);
+            }
+
+            if (! empty($filters['sub_category'])) {
+                $query->where('sub_category_id', $filters['sub_category']);
+            }
+
+            if ($order_by == 'name') {
+                $query->orderBy('name', 'asc');
+            } elseif ($order_by == 'date') {
+                $query->orderBy('created_at', 'desc');
+            }
+
+            if (empty($id)) {
+                $products = $query->paginate($limit);
+            } else {
+                $products = $query->find($id);
+            }
+        } catch (\Exception $e) {
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            return $this->respondWentWrong($e);
+        }
+
+        return $this->respond($products);
+    }
+
+    public function getVariationsApi()
+    {
+        try {
+            $api_token = request()->header('API-TOKEN');
+            $variations_string = request()->header('VARIATIONS');
+
+            if (is_numeric($variations_string)) {
+                $variation_ids = intval($variations_string);
+            } else {
+                parse_str($variations_string, $variation_ids);
+            }
+
+            $api_settings = $this->moduleUtil->getApiSettings($api_token);
+            $location_id = $api_settings->location_id;
+            $business_id = $api_settings->business_id;
+
+            $query = Variation::with([
+                'product_variation',
+                'product' => function ($q) use ($business_id) {
+                    $q->where('business_id', $business_id);
+                },
+                'product.unit',
+                'variation_location_details' => function ($q) use ($location_id) {
+                    $q->where('location_id', $location_id);
+                },
+            ]);
+
+            $variations = is_array($variation_ids) ? $query->whereIn('id', $variation_ids)->get() : $query->where('id', $variation_ids)->first();
+        } catch (\Exception $e) {
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            return $this->respondWentWrong($e);
+        }
+
+        return $this->respond($variations);
+    }
+
+    /**
+     * Shows form to edit multiple products at once.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function bulkEdit(Request $request)
+    {
+        if (! auth()->user()->can('product.update')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $selected_products_string = $request->input('selected_products');
+        if (! empty($selected_products_string)) {
+            $selected_products = explode(',', $selected_products_string);
+            $business_id = $request->session()->get('user.business_id');
+
+            $products = Product::where('business_id', $business_id)
+                                ->whereIn('id', $selected_products)
+                                ->with(['variations', 'variations.product_variation', 'variations.group_prices', 'product_locations'])
+                                ->get();
+
+            $all_categories = Category::catAndSubCategories($business_id);
+
+            $categories = [];
+            $sub_categories = [];
+            foreach ($all_categories as $category) {
+                $categories[$category['id']] = $category['name'];
+
+                if (! empty($category['sub_categories'])) {
+                    foreach ($category['sub_categories'] as $sub_category) {
+                        $sub_categories[$category['id']][$sub_category['id']] = $sub_category['name'];
+                    }
+                }
+            }
+
+            $brands = Brands::forDropdown($business_id);
+
+            $tax_dropdown = TaxRate::forBusinessDropdown($business_id, true, true);
+            $taxes = $tax_dropdown['tax_rates'];
+            $tax_attributes = $tax_dropdown['attributes'];
+
+            $price_groups = SellingPriceGroup::where('business_id', $business_id)->active()->pluck('name', 'id');
+            $business_locations = BusinessLocation::forDropdown($business_id);
+
+            return view('product.bulk-edit')->with(compact(
+                'products',
+                'categories',
+                'brands',
+                'taxes',
+                'tax_attributes',
+                'sub_categories',
+                'price_groups',
+                'business_locations'
+            ));
+        }
+    }
+
+    /**
+     * Updates multiple products at once.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function bulkUpdate(Request $request)
+    {
+        if (! auth()->user()->can('product.update')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        try {
+            $products = $request->input('products');
+            $business_id = $request->session()->get('user.business_id');
+
+            DB::beginTransaction();
+            foreach ($products as $id => $product_data) {
+                $update_data = [
+                    'category_id' => $product_data['category_id'],
+                    'sub_category_id' => $product_data['sub_category_id'],
+                    'brand_id' => $product_data['brand_id'],
+                    'tax' => $product_data['tax'],
+                ];
+
+                //Update product
+                $product = Product::where('business_id', $business_id)
+                                ->findOrFail($id);
+
+                $product->update($update_data);
+
+                //Add product locations
+                $product_locations = ! empty($product_data['product_locations']) ?
+                                    $product_data['product_locations'] : [];
+                $product->product_locations()->sync($product_locations);
+
+                $variations_data = [];
+
+                //Format variations data
+                foreach ($product_data['variations'] as $key => $value) {
+                    $variation = Variation::where('product_id', $product->id)->findOrFail($key);
+                    $variation->default_purchase_price = $this->productUtil->num_uf($value['default_purchase_price']);
+                    $variation->dpp_inc_tax = $this->productUtil->num_uf($value['dpp_inc_tax']);
+                    $variation->profit_percent = $this->productUtil->num_uf($value['profit_percent']);
+                    $variation->default_sell_price = $this->productUtil->num_uf($value['default_sell_price']);
+                    $variation->sell_price_inc_tax = $this->productUtil->num_uf($value['sell_price_inc_tax']);
+                    $variations_data[] = $variation;
+
+                    //Update price groups
+                    if (! empty($value['group_prices'])) {
+                        foreach ($value['group_prices'] as $k => $v) {
+                            VariationGroupPrice::updateOrCreate(
+                                ['price_group_id' => $k, 'variation_id' => $variation->id],
+                                ['price_inc_tax' => $this->productUtil->num_uf($v)]
+                            );
+                        }
+                    }
+                }
+                $product->variations()->saveMany($variations_data);
+            }
+            DB::commit();
+
+            $output = ['success' => 1,
+                'msg' => __('lang_v1.updated_success'),
+            ];
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => 0,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+        }
+
+        return redirect('products')->with('status', $output);
+    }
+
+    /**
+     * Adds product row to edit in bulk edit product form
+     *
+     * @param  int  $product_id
+     * @return \Illuminate\Http\Response
+     */
+    public function getProductToEdit($product_id)
+    {
+        if (! auth()->user()->can('product.update')) {
+            abort(403, 'Unauthorized action.');
+        }
+        $business_id = request()->session()->get('user.business_id');
+
+        $product = Product::where('business_id', $business_id)
+                            ->with(['variations', 'variations.product_variation', 'variations.group_prices'])
+                            ->findOrFail($product_id);
+        $all_categories = Category::catAndSubCategories($business_id);
+
+        $categories = [];
+        $sub_categories = [];
+        foreach ($all_categories as $category) {
+            $categories[$category['id']] = $category['name'];
+
+            if (! empty($category['sub_categories'])) {
+                foreach ($category['sub_categories'] as $sub_category) {
+                    $sub_categories[$category['id']][$sub_category['id']] = $sub_category['name'];
+                }
+            }
+        }
+
+        $brands = Brands::forDropdown($business_id);
+
+        $tax_dropdown = TaxRate::forBusinessDropdown($business_id, true, true);
+        $taxes = $tax_dropdown['tax_rates'];
+        $tax_attributes = $tax_dropdown['attributes'];
+
+        $price_groups = SellingPriceGroup::where('business_id', $business_id)->active()->pluck('name', 'id');
+        $business_locations = BusinessLocation::forDropdown($business_id);
+
+        return view('product.partials.bulk_edit_product_row')->with(compact(
+            'product',
+            'categories',
+            'brands',
+            'taxes',
+            'tax_attributes',
+            'sub_categories',
+            'price_groups',
+            'business_locations'
+        ));
+    }
+
+    /**
+     * Gets the sub units for the given unit.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  int  $unit_id
+     * @return \Illuminate\Http\Response
+     */
+    public function getSubUnits(Request $request)
+    {
+        if (! empty($request->input('unit_id'))) {
+            $unit_id = $request->input('unit_id');
+            $business_id = $request->session()->get('user.business_id');
+            $sub_units = $this->productUtil->getSubUnits($business_id, $unit_id, true);
+
+            //$html = '<option value="">' . __('lang_v1.all') . '</option>';
+            $html = '';
+            if (! empty($sub_units)) {
+                foreach ($sub_units as $id => $sub_unit) {
+                    $html .= '<option value="'.$id.'">'.$sub_unit['name'].'</option>';
+                }
+            }
+
+            return $html;
+        }
+    }
+
+    public function updateProductLocation(Request $request)
+    {
+        if (! auth()->user()->can('product.update')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        try {
+            $selected_products = $request->input('products');
+            $update_type = $request->input('update_type');
+            $location_ids = $request->input('product_location');
+
+            $business_id = $request->session()->get('user.business_id');
+
+            $product_ids = explode(',', $selected_products);
+
+            $products = Product::where('business_id', $business_id)
+                                ->whereIn('id', $product_ids)
+                                ->with(['product_locations'])
+                                ->get();
+            DB::beginTransaction();
+            foreach ($products as $product) {
+                $product_locations = $product->product_locations->pluck('id')->toArray();
+
+                if ($update_type == 'add') {
+                    $product_locations = array_unique(array_merge($location_ids, $product_locations));
+                    $product->product_locations()->sync($product_locations);
+                } elseif ($update_type == 'remove') {
+                    foreach ($product_locations as $key => $value) {
+                        if (in_array($value, $location_ids)) {
+                            unset($product_locations[$key]);
+                        }
+                    }
+                    $product->product_locations()->sync($product_locations);
+                }
+            }
+            DB::commit();
+            $output = ['success' => 1,
+                'msg' => __('lang_v1.updated_success'),
+            ];
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => 0,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+        }
+
+        return $output;
+    }
+
+    public function productStockHistory($id)
+    {
+        if (! auth()->user()->can('product.view')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $business_id = request()->session()->get('user.business_id');
+
+        if (request()->ajax()) {
+
+            //for ajax call $id is variation id else it is product id
+            $stock_details = $this->productUtil->getVariationStockDetails($business_id, $id, request()->input('location_id'));
+            $stock_history = $this->productUtil->getVariationStockHistory($business_id, $id, request()->input('location_id'));
+
+            //if mismach found update stock in variation location details
+            if (isset($stock_history[0]) && (float) $stock_details['current_stock'] != (float) $stock_history[0]['stock']) {
+                VariationLocationDetails::where('variation_id',
+                                            $id)
+                                    ->where('location_id', request()->input('location_id'))
+                                    ->update(['qty_available' => $stock_history[0]['stock']]);
+                $stock_details['current_stock'] = $stock_history[0]['stock'];
+            }
+
+            return view('product.stock_history_details')
+                ->with(compact('stock_details', 'stock_history'));
+        }
+
+        $product = Product::where('business_id', $business_id)
+                            ->with(['variations', 'variations.product_variation'])
+                            ->findOrFail($id);
+
+        //Get all business locations
+        $business_locations = BusinessLocation::forDropdown($business_id);
+
+        return view('product.stock_history')
+                ->with(compact('product', 'business_locations'));
+    }
+
+    /**
+     * Toggle WooComerce sync
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function toggleWooCommerceSync(Request $request)
+    {
+        try {
+            $selected_products = $request->input('woocommerce_products_sync');
+            $woocommerce_disable_sync = $request->input('woocommerce_disable_sync');
+
+            $business_id = $request->session()->get('user.business_id');
+            $product_ids = explode(',', $selected_products);
+
+            DB::beginTransaction();
+            if ($this->moduleUtil->isModuleInstalled('Woocommerce')) {
+                Product::where('business_id', $business_id)
+                        ->whereIn('id', $product_ids)
+                        ->update(['woocommerce_disable_sync' => $woocommerce_disable_sync]);
+            }
+            DB::commit();
+            $output = [
+                'success' => 1,
+                'msg' => __('lang_v1.success'),
+            ];
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = [
+                'success' => 0,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+        }
+
+        return $output;
+    }
+
+    /**
+     * Function to download all products in xlsx format
+     */
+    public function downloadExcel()
+    {
+        $is_admin = $this->productUtil->is_admin(auth()->user());
+        if (! $is_admin) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $filename = 'products-export-'.\Carbon::now()->format('Y-m-d').'.xlsx';
+
+        return Excel::download(new ProductsExport, $filename);
     }
 }

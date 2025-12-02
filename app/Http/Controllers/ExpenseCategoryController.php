@@ -2,139 +2,242 @@
 
 namespace App\Http\Controllers;
 
+use App\ExpenseCategory;
 use Illuminate\Http\Request;
-use App\Models\ExpenseCategory;
-use Keygen;
-use DB;
-use Illuminate\Validation\Rule;
+use Yajra\DataTables\Facades\DataTables;
 
 class ExpenseCategoryController extends Controller
 {
+    /**
+     * Display a listing of the resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
     public function index()
     {
-        $lims_expense_category_all = ExpenseCategory::where('is_active', true)->get();
-        return view('backend.expense_category.index', compact('lims_expense_category_all'));
+        if (! (auth()->user()->can('expense.add') || auth()->user()->can('expense.edit'))) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            $business_id = request()->session()->get('user.business_id');
+
+            $expense_category = ExpenseCategory::where('business_id', $business_id)
+                        ->select(['name', 'code', 'id', 'parent_id']);
+
+            return Datatables::of($expense_category)
+                ->addColumn(
+                    'action',
+                    '<button data-href="{{action(\'App\Http\Controllers\ExpenseCategoryController@edit\', [$id])}}" class="tw-dw-btn tw-dw-btn-xs tw-dw-btn-outline tw-dw-btn-primary btn-modal" data-container=".expense_category_modal"><i class="glyphicon glyphicon-edit"></i>  @lang("messages.edit")</button>
+                        &nbsp;
+                        <button data-href="{{action(\'App\Http\Controllers\ExpenseCategoryController@destroy\', [$id])}}" class="tw-dw-btn tw-dw-btn-outline tw-dw-btn-xs tw-dw-btn-error delete_expense_category"><i class="glyphicon glyphicon-trash"></i> @lang("messages.delete")</button>'
+                )
+                ->editColumn('name', function ($row) {
+                    if (! empty($row->parent_id)) {
+                        return '--'.$row->name;
+                    } else {
+                        return $row->name;
+                    }
+                })
+                ->removeColumn('id')
+                ->removeColumn('parent_id')
+                ->rawColumns([2])
+                ->make(false);
+        }
+
+        return view('expense_category.index');
     }
 
+    /**
+     * Show the form for creating a new resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
     public function create()
     {
-        //
+        if (! (auth()->user()->can('expense.add') || auth()->user()->can('expense.edit'))) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $business_id = request()->session()->get('user.business_id');
+        $categories = ExpenseCategory::where('business_id', $business_id)
+                        ->whereNull('parent_id')
+                        ->pluck('name', 'id');
+
+        return view('expense_category.create')->with(compact('categories'));
     }
 
-    public function generateCode()
-    {
-        $id = Keygen::numeric(8)->generate();
-        return $id;
-    }
-
+    /**
+     * Store a newly created resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
     public function store(Request $request)
     {
-        $this->validate($request, [
-            'code' => [
-                'max:255',
-                    Rule::unique('expense_categories')->where(function ($query) {
-                    return $query->where('is_active', 1);
-                }),
-            ]
-        ]);
+        if (! (auth()->user()->can('expense.add') || auth()->user()->can('expense.edit'))) {
+            abort(403, 'Unauthorized action.');
+        }
 
-        $data = $request->all();
-        ExpenseCategory::create($data);
-        return redirect('expense_categories')->with('message', 'Data inserted successfully');
+        try {
+            $input = $request->only(['name', 'code']);
+            $input['business_id'] = $request->session()->get('user.business_id');
+
+            if (! empty($request->input('add_as_sub_cat')) && $request->input('add_as_sub_cat') == 1 && ! empty($request->input('parent_id'))) {
+                $input['parent_id'] = $request->input('parent_id');
+            }
+
+            ExpenseCategory::create($input);
+            $output = ['success' => true,
+                'msg' => __('expense.added_success'),
+            ];
+        } catch (\Exception $e) {
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => false,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+        }
+
+        return $output;
     }
 
-    public function show($id)
+    /**
+     * Display the specified resource.
+     *
+     * @param  \App\ExpenseCategory  $expenseCategory
+     * @return \Illuminate\Http\Response
+     */
+    public function show(ExpenseCategory $expenseCategory)
     {
         //
     }
 
+    /**
+     * Show the form for editing the specified resource.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
     public function edit($id)
     {
-        $lims_expense_category_data = ExpenseCategory::find($id);
-        return $lims_expense_category_data;
+        if (! (auth()->user()->can('expense.add') || auth()->user()->can('expense.edit'))) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            $business_id = request()->session()->get('user.business_id');
+            $expense_category = ExpenseCategory::where('business_id', $business_id)->find($id);
+
+            $categories = ExpenseCategory::where('business_id', $business_id)
+                        ->whereNull('parent_id')
+                        ->pluck('name', 'id');
+
+            return view('expense_category.edit')
+                    ->with(compact('expense_category', 'categories'));
+        }
     }
 
+    /**
+     * Update the specified resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
     public function update(Request $request, $id)
     {
-        $this->validate($request, [
-            'code' => [
-                'max:255',
-                    Rule::unique('expense_categories')->ignore($request->expense_category_id)->where(function ($query) {
-                    return $query->where('is_active', 1);
-                }),
-            ]
-        ]);
-
-        $data = $request->all();
-        $lims_expense_category_data = ExpenseCategory::find($data['expense_category_id']);
-        $lims_expense_category_data->update($data);
-        return redirect('expense_categories')->with('message', 'Data updated successfully');
-    }
-
-    public function import(Request $request)
-    {
-        //get file
-        $upload=$request->file('file');
-        $ext = pathinfo($upload->getClientOriginalName(), PATHINFO_EXTENSION);
-        if($ext != 'csv')
-            return redirect()->back()->with('not_permitted', 'Please upload a CSV file');
-        $filename =  $upload->getClientOriginalName();
-        $filePath=$upload->getRealPath();
-        //open and read
-        $file=fopen($filePath, 'r');
-        $header= fgetcsv($file);
-        $escapedHeader=[];
-        //validate
-        foreach ($header as $key => $value) {
-            $lheader=strtolower($value);
-            $escapedItem=preg_replace('/[^a-z]/', '', $lheader);
-            array_push($escapedHeader, $escapedItem);
+        if (! (auth()->user()->can('expense.add') || auth()->user()->can('expense.edit'))) {
+            abort(403, 'Unauthorized action.');
         }
-        //looping through othe columns
-        while($columns=fgetcsv($file))
-        {
-            if($columns[0]=="")
-                continue;
-            foreach ($columns as $key => $value) {
-                $value=preg_replace('/\D/','',$value);
+
+        if (request()->ajax()) {
+            try {
+                $input = $request->only(['name', 'code']);
+                $business_id = $request->session()->get('user.business_id');
+
+                $expense_category = ExpenseCategory::where('business_id', $business_id)->findOrFail($id);
+                $expense_category->name = $input['name'];
+                $expense_category->code = $input['code'];
+
+                if (! empty($request->input('add_as_sub_cat')) && $request->input('add_as_sub_cat') == 1 && ! empty($request->input('parent_id'))) {
+                    $expense_category->parent_id = $request->input('parent_id');
+                } else {
+                    $expense_category->parent_id = null;
+                }
+
+                $expense_category->save();
+
+                $output = ['success' => true,
+                    'msg' => __('expense.updated_success'),
+                ];
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
             }
-           $data= array_combine($escapedHeader, $columns);
-           $expense_category = ExpenseCategory::firstOrNew(['code' => $data['code'], 'is_active' => true ]);
-           $expense_category->code = $data['code'];
-           $expense_category->name = $data['name'];
-           $expense_category->is_active = true;
-           $expense_category->save();
+
+            return $output;
         }
-        return redirect('expense_categories')->with('message', 'ExpenseCategory imported successfully');
     }
 
-    public function deleteBySelection(Request $request)
-    {
-        $expense_category_id = $request['expense_categoryIdArray'];
-        foreach ($expense_category_id as $id) {
-            $lims_expense_category_data = ExpenseCategory::find($id);
-            $lims_expense_category_data->is_active = false;
-            $lims_expense_category_data->save();
-        }
-        return 'Expense Category deleted successfully!';
-    }
-
+    /**
+     * Remove the specified resource from storage.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
     public function destroy($id)
     {
-        $lims_expense_category_data = ExpenseCategory::find($id);
-        $lims_expense_category_data->is_active = false;
-        $lims_expense_category_data->save();
-        return redirect('expense_categories')->with('not_permitted', 'Data deleted successfully');
-    }
-
-    public function expenseCategoriesAll()
-    {
-        $lims_expense_category_list = DB::table('expense_categories')->where('is_active', true)->get();
-        $html = '';
-        foreach($lims_expense_category_list as $expense_category){
-            $html .='<option value="'.$expense_category->id.'">'.$expense_category->name . ' (' . $expense_category->code. ')'.'</option>';
+        if (! (auth()->user()->can('expense.add') || auth()->user()->can('expense.edit'))) {
+            abort(403, 'Unauthorized action.');
         }
 
-        return response()->json($html);
+        if (request()->ajax()) {
+            try {
+                $business_id = request()->session()->get('user.business_id');
+
+                $expense_category = ExpenseCategory::where('business_id', $business_id)->findOrFail($id);
+                $expense_category->delete();
+
+                //delete sub categories also
+                ExpenseCategory::where('business_id', $business_id)->where('parent_id', $id)->delete();
+
+                $output = ['success' => true,
+                    'msg' => __('expense.deleted_success'),
+                ];
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
+            }
+
+            return $output;
+        }
+    }
+
+    public function getSubCategories(Request $request)
+    {
+        if (! empty($request->input('cat_id'))) {
+            $category_id = $request->input('cat_id');
+            $business_id = $request->session()->get('user.business_id');
+            $sub_categories = ExpenseCategory::where('business_id', $business_id)
+                        ->where('parent_id', $category_id)
+                        ->select(['name', 'id'])
+                        ->get();
+        }
+
+        $html = '<option value="">'.__('lang_v1.none').'</option>';
+        if (! empty($sub_categories)) {
+            foreach ($sub_categories as $sub_category) {
+                $html .= '<option value="'.$sub_category->id.'">'.$sub_category->name.'</option>';
+            }
+        }
+        echo $html;
+        exit;
     }
 }

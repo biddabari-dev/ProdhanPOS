@@ -16,8 +16,8 @@ define('LARAVEL_START', microtime(true));
 |
 */
 
-if (file_exists(__DIR__.'/../storage/framework/maintenance.php')) {
-    require __DIR__.'/../storage/framework/maintenance.php';
+if (file_exists($maintenance = __DIR__.'/../storage/framework/maintenance.php')) {
+    require $maintenance;
 }
 
 /*
@@ -46,7 +46,6 @@ require __DIR__.'/../vendor/autoload.php';
 
 $app = require_once __DIR__.'/../bootstrap/app.php';
 
-// 🟢 এই কোডটি ব্যবহার করুন 🟢
 $kernel = $app->make(Kernel::class);
 
 $response = $kernel->handle(
@@ -54,23 +53,3 @@ $response = $kernel->handle(
 )->send();
 
 $kernel->terminate($request, $response);
-
-// $install1 = is_dir('public/install');
-// $install2 = is_dir('install');
-
-// if ($install1 == true) {
-//     header("location:public/install/index.php");
-// }
-// elseif($install2 == true)
-// {
-//     header("location:install/index.php");
-// }
-// else {
-//     $kernel = $app->make(Kernel::class);
-
-//     $response = $kernel->handle(
-//         $request = Request::capture()
-//     )->send();
-
-//     $kernel->terminate($request, $response);
-// }

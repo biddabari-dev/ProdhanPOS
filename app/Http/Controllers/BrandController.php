@@ -2,199 +2,251 @@
 
 namespace App\Http\Controllers;
 
+use App\Brands;
+use App\Utils\ModuleUtil;
 use Illuminate\Http\Request;
-use App\Models\Brand;
-use Illuminate\Validation\Rule;
-use App\Traits\TenantInfo;
-use App\Traits\CacheForget;
-use Illuminate\Support\Str;
+use Yajra\DataTables\Facades\DataTables;
 
 class BrandController extends Controller
 {
-    use CacheForget;
-    use TenantInfo;
+    /**
+     * All Utils instance.
+     */
+    protected $moduleUtil;
 
+    /**
+     * Constructor
+     *
+     * @param  ProductUtils  $product
+     * @return void
+     */
+    public function __construct(ModuleUtil $moduleUtil)
+    {
+        $this->moduleUtil = $moduleUtil;
+    }
+
+    /**
+     * Display a listing of the resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
     public function index()
     {
-        $lims_brand_all = Brand::where('is_active',true)->get();
-        return view('backend.brand.create', compact('lims_brand_all'));
+        if (! auth()->user()->can('brand.view') && ! auth()->user()->can('brand.create')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            $business_id = request()->session()->get('user.business_id');
+
+            $brands = Brands::where('business_id', $business_id)
+                        ->select(['name', 'description', 'id']);
+
+            return Datatables::of($brands)
+                ->addColumn(
+                    'action',
+                    '@can("brand.update")
+                    <button data-href="{{action(\'App\Http\Controllers\BrandController@edit\', [$id])}}" class="tw-dw-btn tw-dw-btn-xs tw-dw-btn-outline tw-dw-btn-primary edit_brand_button"><i class="glyphicon glyphicon-edit"></i> @lang("messages.edit")</button>
+                        &nbsp;
+                    @endcan
+                    @can("brand.delete")
+                        <button data-href="{{action(\'App\Http\Controllers\BrandController@destroy\', [$id])}}" class="tw-dw-btn tw-dw-btn-outline tw-dw-btn-xs tw-dw-btn-error delete_brand_button"><i class="glyphicon glyphicon-trash"></i> @lang("messages.delete")</button>
+                    @endcan'
+                )
+                ->removeColumn('id')
+                ->rawColumns([2])
+                ->make(false);
+        }
+
+        return view('brand.index');
     }
 
+    /**
+     * Show the form for creating a new resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function create()
+    {
+        if (! auth()->user()->can('brand.create')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $quick_add = false;
+        if (! empty(request()->input('quick_add'))) {
+            $quick_add = true;
+        }
+
+        $is_repair_installed = $this->moduleUtil->isModuleInstalled('Repair');
+
+        return view('brand.create')
+                ->with(compact('quick_add', 'is_repair_installed'));
+    }
+
+    /**
+     * Store a newly created resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
     public function store(Request $request)
     {
-
-        $request->title = preg_replace('/\s+/', ' ', $request->title);
-        $this->validate($request, [
-            'title' => [
-                'max:255',
-                    Rule::unique('brands')->where(function ($query) {
-                    return $query->where('is_active', 1);
-                }),
-            ],
-
-            'image' => 'image|mimes:jpg,jpeg,png,gif|max:100000',
-        ]);
-
-        $input = $request->except('image');
-        $input['is_active'] = true;
-        if(in_array('ecommerce', explode(',',config('addons'))))
-            $input['slug'] = Str::slug($request->title, '-');
-        $image = $request->image;
-        if ($image) {
-            $ext = pathinfo($image->getClientOriginalName(), PATHINFO_EXTENSION);
-            $imageName = date("Ymdhis");
-            if(!config('database.connections.saleprosaas_landlord')) {
-                $imageName = $imageName . '.' . $ext;
-                $image->move(public_path('images/brand'),$imageName);
-            }
-            else {
-                $imageName = $this->getTenantId() . '_' . $imageName . '.' . $ext;
-                $image->move(public_path('images/brand'),$imageName);
-            }
-            $input['image'] = $imageName;
+        if (! auth()->user()->can('brand.create')) {
+            abort(403, 'Unauthorized action.');
         }
-        $brand = Brand::create($input);
-        $this->cacheForget('brand_list');
 
-        if(isset($input['ajax']))
-            return $brand;
-        else 
-            return redirect('brand');
+        try {
+            $input = $request->only(['name', 'description']);
+            $business_id = $request->session()->get('user.business_id');
+            $input['business_id'] = $business_id;
+            $input['created_by'] = $request->session()->get('user.id');
+
+            if ($this->moduleUtil->isModuleInstalled('Repair')) {
+                $input['use_for_repair'] = ! empty($request->input('use_for_repair')) ? 1 : 0;
+            }
+
+            $brand = Brands::create($input);
+            $output = ['success' => true,
+                'data' => $brand,
+                'msg' => __('brand.added_success'),
+            ];
+        } catch (\Exception $e) {
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => false,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+        }
+
+        return $output;
     }
 
+    /**
+     * Display the specified resource.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
+    public function show($id)
+    {
+        //
+    }
+
+    /**
+     * Show the form for editing the specified resource.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
     public function edit($id)
     {
-        $lims_brand_data = Brand::findOrFail($id);
-        return $lims_brand_data;
+        if (! auth()->user()->can('brand.update')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            $business_id = request()->session()->get('user.business_id');
+            $brand = Brands::where('business_id', $business_id)->find($id);
+
+            $is_repair_installed = $this->moduleUtil->isModuleInstalled('Repair');
+
+            return view('brand.edit')
+                ->with(compact('brand', 'is_repair_installed'));
+        }
     }
 
+    /**
+     * Update the specified resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
     public function update(Request $request, $id)
     {
-        $this->validate($request, [
-            'title' => [
-                'max:255',
-                    Rule::unique('brands')->ignore($request->brand_id)->where(function ($query) {
-                    return $query->where('is_active', 1);
-                }),
-            ],
+        if (! auth()->user()->can('brand.update')) {
+            abort(403, 'Unauthorized action.');
+        }
 
-            'image' => 'image|mimes:jpg,jpeg,png,gif|max:100000',
-        ]);
-        $lims_brand_data = Brand::findOrFail($request->brand_id);
-        $lims_brand_data->title = $request->title;
-        if(in_array('ecommerce', explode(',',config('addons')))) {
-            $lims_brand_data->page_title = $request->page_title;
-            $lims_brand_data->short_description = $request->short_description;
-        }
-        $image = $request->image;
-        if ($image) {
-            $ext = pathinfo($image->getClientOriginalName(), PATHINFO_EXTENSION);
-            $imageName = date("Ymdhis");
-            if(!config('database.connections.saleprosaas_landlord')) {
-                $imageName = $imageName . '.' . $ext;
-                $image->move(public_path('images/brand'),$imageName);
+        if (request()->ajax()) {
+            try {
+                $input = $request->only(['name', 'description']);
+                $business_id = $request->session()->get('user.business_id');
+
+                $brand = Brands::where('business_id', $business_id)->findOrFail($id);
+                $brand->name = $input['name'];
+                $brand->description = $input['description'];
+
+                if ($this->moduleUtil->isModuleInstalled('Repair')) {
+                    $brand->use_for_repair = ! empty($request->input('use_for_repair')) ? 1 : 0;
+                }
+
+                $brand->save();
+
+                $output = ['success' => true,
+                    'msg' => __('brand.updated_success'),
+                ];
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
             }
-            else {
-                $imageName = $this->getTenantId() . '_' . $imageName . '.' . $ext;
-                $image->move(public_path('images/brand'),$imageName);
-            }
-            $lims_brand_data->image = $imageName;
+
+            return $output;
         }
-        $lims_brand_data->save();
-        $this->cacheForget('brand_list');
-        return redirect('brand');
     }
 
-    public function importBrand(Request $request)
-    {
-        //get file
-        $upload=$request->file('file');
-        $ext = pathinfo($upload->getClientOriginalName(), PATHINFO_EXTENSION);
-        if($ext != 'csv')
-            return redirect()->back()->with('not_permitted', 'Please upload a CSV file');
-        $filename =  $upload->getClientOriginalName();
-        $filePath=$upload->getRealPath();
-        //open and read
-        $file=fopen($filePath, 'r');
-        $header= fgetcsv($file);
-        $escapedHeader=[];
-        //validate
-        foreach ($header as $key => $value) {
-            $lheader=strtolower($value);
-            $escapedItem=preg_replace('/[^a-z]/', '', $lheader);
-            array_push($escapedHeader, $escapedItem);
-        }
-        //looping through othe columns
-        while($columns=fgetcsv($file))
-        {
-            if($columns[0]=="")
-                continue;
-            foreach ($columns as $key => $value) {
-                $value=preg_replace('/\D/','',$value);
-            }
-           $data= array_combine($escapedHeader, $columns);
-
-           $brand = Brand::firstOrNew([ 'title'=>$data['title'], 'is_active'=>true ]);
-           $brand->title = $data['title'];
-           $brand->image = $data['image'];
-           $brand->is_active = true;
-           $brand->save();
-        }
-        $this->cacheForget('brand_list');
-        return redirect('brand')->with('message', 'Brand imported successfully');
-    }
-
-    public function deleteBySelection(Request $request)
-    {
-        $brand_id = $request['brandIdArray'];
-        foreach ($brand_id as $id) {
-            $lims_brand_data = Brand::findOrFail($id);
-            if($lims_brand_data->image && !config('database.connections.saleprosaas_landlord') && file_exists('images/brand/'.$lims_brand_data->image)) {
-                unlink('images/brand/'.$lims_brand_data->image);
-            }
-            elseif($lims_brand_data->image && file_exists('images/brand/'.$lims_brand_data->image)) {
-                unlink('images/brand/'.$lims_brand_data->image);
-            }
-            $lims_brand_data->is_active = false;
-            $lims_brand_data->save();
-        }
-        $this->cacheForget('brand_list');
-        return 'Brand deleted successfully!';
-    }
-
+    /**
+     * Remove the specified resource from storage.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
     public function destroy($id)
     {
-        $lims_brand_data = Brand::findOrFail($id);
-        $lims_brand_data->is_active = false;
-        if($lims_brand_data->image && !config('database.connections.saleprosaas_landlord') && file_exists('images/brand/'.$lims_brand_data->image)) {
-            unlink('images/brand/'.$lims_brand_data->image);
+        if (! auth()->user()->can('brand.delete')) {
+            abort(403, 'Unauthorized action.');
         }
-        elseif($lims_brand_data->image && file_exists('images/brand/'.$lims_brand_data->image)) {
-            unlink('images/brand/'.$lims_brand_data->image);
+
+        if (request()->ajax()) {
+            try {
+                $business_id = request()->user()->business_id;
+
+                $brand = Brands::where('business_id', $business_id)->findOrFail($id);
+                $brand->delete();
+
+                $output = ['success' => true,
+                    'msg' => __('brand.deleted_success'),
+                ];
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
+            }
+
+            return $output;
         }
-        $lims_brand_data->save();
-        $this->cacheForget('brand_list');
-        return redirect('brand')->with('not_permitted', 'Brand deleted successfully!');
     }
 
-    public function exportBrand(Request $request)
+    public function getBrandsApi()
     {
-        $lims_brand_data = $request['brandArray'];
-        $csvData=array('Brand Title, Image');
-        foreach ($lims_brand_data as $brand) {
-            if($brand > 0) {
-                $data = Brand::where('id', $brand)->first();
-                $csvData[]=$data->title.','.$data->image;
-            }
+        try {
+            $api_token = request()->header('API-TOKEN');
+
+            $api_settings = $this->moduleUtil->getApiSettings($api_token);
+
+            $brands = Brands::where('business_id', $api_settings->business_id)
+                                ->get();
+        } catch (\Exception $e) {
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            return $this->respondWentWrong($e);
         }
-        $filename=date('Y-m-d').".csv";
-        $file_path=public_path().'/downloads/'.$filename;
-        $file_url=url('/').'/downloads/'.$filename;
-        $file = fopen($file_path,"w+");
-        foreach ($csvData as $exp_data){
-          fputcsv($file,explode(',',$exp_data));
-        }
-        fclose($file);
-        return $file_url;
+
+        return $this->respond($brands);
     }
 }

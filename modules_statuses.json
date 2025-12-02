@@ -1,6 +1,23 @@
 {
-    "Woocommerce": true,
+    "Essentials": true,
+    "Accounting": true,
+    "AssetManagement": true,
+    "Cms": true,
+    "Connector": true,
+    "Crm": true,
     "Ecommerce": true,
-    "Middleware": true,
-    "Manufacturing": true
+    "FieldForce": true,
+    "Manufacturing": true,
+    "ProductCatalogue": true,
+    "Project": true,
+    "Repair": true,
+    "Spreadsheet": true,
+    "Superadmin": true,
+    "Woocommerce": true,
+    "AiAssistance": true,
+    "Hms": true,
+    "InboxReport": true,
+    "CustomDashboard": true,
+    "Gym": true,
+    "ZatcaIntegrationKsa": true
 }

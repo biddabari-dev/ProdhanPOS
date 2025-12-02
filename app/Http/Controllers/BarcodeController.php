@@ -2,119 +2,95 @@
 
 namespace App\Http\Controllers;
 
+use App\Barcode;
+use Datatables;
 use Illuminate\Http\Request;
-use App\Models\Barcode;
-use DB;
 
 class BarcodeController extends Controller
 {
     /**
      * Display a listing of the resource.
+     *
+     * @return \Illuminate\Http\Response
      */
-    public function index(Request $request)
+    public function index()
     {
-        return view('backend.barcode.index');
+        if (! auth()->user()->can('barcode_settings.access')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            $business_id = request()->session()->get('user.business_id');
+
+            $barcodes = Barcode::where('business_id', $business_id)
+                        ->select(['name', 'description', 'id', 'is_default']);
+
+            return Datatables::of($barcodes)
+                ->addColumn(
+                    'action',
+                    '<a href="{{action(\'App\Http\Controllers\BarcodeController@edit\', [$id])}}" class="tw-dw-btn tw-dw-btn-xs tw-dw-btn-outline tw-dw-btn-primary"><i class="glyphicon glyphicon-edit"></i> @lang("messages.edit")</a>
+                        &nbsp;
+                        <button type="button" data-href="{{action(\'App\Http\Controllers\BarcodeController@destroy\', [$id])}}" class="tw-dw-btn tw-dw-btn-outline tw-dw-btn-xs tw-dw-btn-error delete_barcode_button" @if($is_default) disabled @endif><i class="glyphicon glyphicon-trash"></i> @lang("messages.delete")</button>&nbsp;
+                        @if($is_default)
+                            <button type="button" class="tw-dw-btn tw-dw-btn-xs tw-dw-btn-outline tw-dw-btn-accent" disabled><i class="fa fa-check-square-o" aria-hidden="true"></i> @lang("barcode.default")</button>
+                        @else
+                            <button class="btn btn-xs btn-info set_default" data-href="{{action(\'App\Http\Controllers\BarcodeController@setDefault\', [$id])}}">@lang("barcode.set_as_default")</button>
+                        @endif
+                        '
+                )
+                ->editColumn('name', function ($row) {
+                    if ($row->is_default == 1) {
+                        return $row->name.' &nbsp; <span class="label label-success">'.__('barcode.default').'</span>';
+                    } else {
+                        return $row->name;
+                    }
+                })
+                ->removeColumn('id')
+                ->removeColumn('is_default')
+                ->rawColumns([0, 2])
+                ->make(false);
+        }
+
+        return view('barcode.index');
     }
 
-    public function barcodeData(Request $request)
-    {
-
-        $columns = array(
-            0 =>'id',
-            2 =>'name',
-            3=> 'description',
-        );
-
-        $totalData = DB::table('barcodes')->where('is_custom',true)->count();
-        $totalFiltered = $totalData;
-
-        if($request->input('length') != -1)
-            $limit = $request->input('length');
-        else
-            $limit = $totalData;
-        $start = $request->input('start');
-        $order = $columns[$request->input('order.0.column')];
-        $dir = $request->input('order.0.dir');
-        if(empty($request->input('search.value')))
-            $barcodes = Barcode::offset($start)
-                        ->where('is_custom',true)
-                        ->limit($limit)
-                        ->orderBy($order,$dir)
-                        ->get();
-        else
-        {
-            $search = $request->input('search.value');
-            $barcodes =  Barcode::where([
-                            ['name', 'LIKE', "%{$search}%"],
-                            ['is_custom', true]
-                        ])->offset($start)
-                        ->limit($limit)
-                        ->orderBy($order,$dir)->get();
-
-            $totalFiltered = Barcode::where([
-                                ['name', 'LIKE', "%{$search}%"],
-                                ['is_custom', true]
-                        ])->count();
-        }
-        $data = array();
-        if(!empty($barcodes))
-        {
-            foreach ($barcodes as $key=>$barcode)
-            {
-                $nestedData['id'] = $barcode->id;
-                $nestedData['key'] = $key;
-                $nestedData['name'] = $barcode->name;
-                $nestedData['description'] = $barcode->description;
-
-                $nestedData['options'] = '<div class="btn-group">
-                            <button type="button" class="btn btn-default btn-sm dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">'.trans("file.action").'
-                            <span class="caret"></span>
-                            <span class="sr-only">Toggle Dropdown</span>
-                            </button>
-                            <ul class="dropdown-menu edit-options dropdown-menu-right dropdown-default" user="menu">
-                                <li>
-                                    <a  href="'.route('barcodes.edit', $barcode->id).'" class="btn btn-link"><i class="dripicons-document-edit"></i> '.trans("file.edit").'</a>
-                                </li>
-                                <li class="divider"></li>'.
-                                \Form::open(["route" => ["barcodes.destroy", $barcode->id], "method" => "DELETE"] ).'
-                                <li>
-                                <button type="submit" class="btn btn-link" onclick="return confirmDelete()"><i class="dripicons-trash"></i> '.trans("file.delete").'</button>
-                                </li>'.\Form::close().'
-                            </ul>
-                        </div>';
-                $data[] = $nestedData;
-            }
-        }
-        $json_data = array(
-            "draw"            => intval($request->input('draw')),
-            "recordsTotal"    => intval($totalData),
-            "recordsFiltered" => intval($totalFiltered),
-            "data"            => $data
-            );
-
-        echo json_encode($json_data);
-    }
     /**
      * Show the form for creating a new resource.
+     *
+     * @return \Illuminate\Http\Response
      */
     public function create()
     {
-        return view('backend.barcode.create');
+        if (! auth()->user()->can('barcode_settings.access')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        return view('barcode.create');
     }
 
     /**
      * Store a newly created resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
      */
     public function store(Request $request)
     {
+        if (! auth()->user()->can('barcode_settings.access')) {
+            abort(403, 'Unauthorized action.');
+        }
+
         try {
             $input = $request->only(['name', 'description', 'width', 'height', 'top_margin',
                 'left_margin', 'row_distance', 'col_distance',
-                'stickers_in_one_row', 'paper_width','is_custom' ]);
+                'stickers_in_one_row', 'paper_width', ]);
+            $business_id = $request->session()->get('user.business_id');
+            $input['business_id'] = $business_id;
 
             if (! empty($request->input('is_default'))) {
                 //get_default
-                $default = Barcode::where('is_default', 1)
+                $default = Barcode::where('business_id', $business_id)
+                                ->where('is_default', 1)
                                 ->update(['is_default' => 0]);
                 $input['is_default'] = 1;
             }
@@ -125,6 +101,7 @@ class BarcodeController extends Controller
                 $input['stickers_in_one_sheet'] = $request->input('stickers_in_one_sheet');
                 $input['paper_height'] = $request->input('paper_height');
             }
+
             $barcode = Barcode::create($input);
             $output = ['success' => 1,
                 'msg' => __('barcode.added_success'),
@@ -142,31 +119,51 @@ class BarcodeController extends Controller
 
     /**
      * Display the specified resource.
+     *
+     * @param  \App\Barcode  $barcode
+     * @return \Illuminate\Http\Response
      */
-    public function show(string $id)
+    public function show(Barcode $barcode)
     {
         //
     }
 
     /**
      * Show the form for editing the specified resource.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
      */
-    public function edit(string $id)
+    public function edit($id)
     {
-        $barcode = Barcode::where('is_custom',true)->find($id);
+        if (! auth()->user()->can('barcode_settings.access')) {
+            abort(403, 'Unauthorized action.');
+        }
 
-        return view('backend.barcode.edit',compact('barcode'));
+        $business_id = request()->session()->get('user.business_id');
+        $barcode = Barcode::where('business_id', $business_id)->find($id);
+
+        return view('barcode.edit')
+            ->with(compact('barcode'));
     }
 
     /**
      * Update the specified resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
      */
-    public function update(Request $request, string $id)
+    public function update(Request $request, $id)
     {
+        if (! auth()->user()->can('barcode_settings.access')) {
+            abort(403, 'Unauthorized action.');
+        }
+
         try {
             $input = $request->only(['name', 'description', 'width', 'height', 'top_margin',
                 'left_margin', 'row_distance', 'col_distance',
-                'stickers_in_one_row', 'paper_width', 'is_custom' ]);
+                'stickers_in_one_row', 'paper_width', ]);
 
             if (! empty($request->input('is_continuous'))) {
                 $input['is_continuous'] = 1;
@@ -178,16 +175,7 @@ class BarcodeController extends Controller
                 $input['paper_height'] = $request->input('paper_height');
             }
 
-            if (! empty($request->input('is_default'))) {
-                //get_default
-                $default = Barcode::where('is_default', 1)
-                                ->update(['is_default' => 0]);
-                $input['is_default'] = 1;
-                Barcode::where('id', $id)->update($input);
-
-            }
-
-                Barcode::where('id', $id)->update($input);
+            $barcode = Barcode::where('id', $id)->update($input);
 
             $output = ['success' => 1,
                 'msg' => __('barcode.updated_success'),
@@ -205,9 +193,77 @@ class BarcodeController extends Controller
 
     /**
      * Remove the specified resource from storage.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
      */
-    public function destroy(string $id)
+    public function destroy($id)
     {
-        //
+        if (! auth()->user()->can('barcode_settings.access')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            try {
+                $barcode = Barcode::find($id);
+                if ($barcode->is_default != 1) {
+                    $barcode->delete();
+                    $output = ['success' => true,
+                        'msg' => __('barcode.deleted_success'),
+                    ];
+                } else {
+                    $output = ['success' => false,
+                        'msg' => __('messages.something_went_wrong'),
+                    ];
+                }
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
+            }
+
+            return $output;
+        }
+    }
+
+    /**
+     * Sets barcode setting as default
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
+    public function setDefault($id)
+    {
+        if (! auth()->user()->can('barcode_settings.access')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            try {
+                //get_default
+                $business_id = request()->session()->get('user.business_id');
+                $default = Barcode::where('business_id', $business_id)
+                                ->where('is_default', 1)
+                                 ->update(['is_default' => 0]);
+
+                $barcode = Barcode::find($id);
+                $barcode->is_default = 1;
+                $barcode->save();
+
+                $output = ['success' => true,
+                    'msg' => __('barcode.default_set_success'),
+                ];
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
+            }
+
+            return $output;
+        }
     }
 }

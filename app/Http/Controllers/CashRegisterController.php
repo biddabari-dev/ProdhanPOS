@@ -2,138 +2,233 @@
 
 namespace App\Http\Controllers;
 
+use App\BusinessLocation;
+use App\CashRegister;
+use App\Utils\CashRegisterUtil;
+use App\Utils\ModuleUtil;
 use Illuminate\Http\Request;
-use App\Models\CashRegister;
-use App\Models\Sale;
-use App\Models\Payment;
-use App\Models\Returns;
-use App\Models\Expense;
-use Auth;
 
 class CashRegisterController extends Controller
 {
-	public function index()
-	{
-		if(Auth::user()->role_id <= 2) {
-			$lims_cash_register_all = CashRegister::with('user', 'warehouse')->get();
-			return view('backend.cash_register.index', compact('lims_cash_register_all'));
-		}
-		else
-			return redirect()->back()->with('not_permitted', 'Sorry! You are not allowed to access this module');
-	}
-	public function store(Request $request)
-	{
-		$data = $request->all();
-		$data['status'] = true;
-		$data['user_id'] = Auth::id();
-		CashRegister::create($data);
-		return redirect()->back()->with('message', 'Cash register created successfully');
-	}
+    /**
+     * All Utils instance.
+     */
+    protected $cashRegisterUtil;
 
-	public function getDetails($id)
-	{
-		$cash_register_data = CashRegister::find($id);
+    protected $moduleUtil;
 
-		$data['cash_in_hand'] = $cash_register_data->cash_in_hand;
-		$data['total_sale_amount'] = Sale::where([
-										['cash_register_id', $cash_register_data->id],
-										['sale_status', 1]
-									])->sum('grand_total');
-		$data['total_payment'] = Payment::where('cash_register_id', $cash_register_data->id)->sum('amount');
-		$data['cash_payment'] = Payment::where([
-									['cash_register_id', $cash_register_data->id],
-									['paying_method', 'Cash']
-								])->sum('amount');
-		$data['credit_card_payment'] = Payment::where([
-									['cash_register_id', $cash_register_data->id],
-									['paying_method', 'Credit Card']
-								])->sum('amount');
-		$data['gift_card_payment'] = Payment::where([
-									['cash_register_id', $cash_register_data->id],
-									['paying_method', 'Gift Card']
-								])->sum('amount');
-		$data['deposit_payment'] = Payment::where([
-									['cash_register_id', $cash_register_data->id],
-									['paying_method', 'Deposit']
-								])->sum('amount');
-		$data['cheque_payment'] = Payment::where([
-									['cash_register_id', $cash_register_data->id],
-									['paying_method', 'Cheque']
-								])->sum('amount');
-		$data['paypal_payment'] = Payment::where([
-									['cash_register_id', $cash_register_data->id],
-									['paying_method', 'Paypal']
-								])->sum('amount');
-		$data['total_sale_return'] = Returns::where('cash_register_id', $cash_register_data->id)->sum('grand_total');
-		$data['total_expense'] = Expense::where('cash_register_id', $cash_register_data->id)->sum('amount');
-		$data['total_cash'] = $data['cash_in_hand'] + $data['total_payment'] - ($data['total_sale_return'] + $data['total_expense']);
-		$data['status'] = $cash_register_data->status;
-		return $data;
-	}
-
-	public function showDetails($warehouse_id)
-	{
-		$cash_register_data = CashRegister::where([
-					    		['user_id', Auth::id()],
-					    		['warehouse_id', $warehouse_id],
-					    		['status', true]
-					    	])->first();
-
-		$data['cash_in_hand'] = $cash_register_data->cash_in_hand;
-		$data['total_sale_amount'] = Sale::where([
-										['cash_register_id', $cash_register_data->id],
-										['sale_status', 1]
-									])->sum('grand_total');
-		$data['total_payment'] = Payment::where('cash_register_id', $cash_register_data->id)->sum('amount');
-		$data['cash_payment'] = Payment::where([
-									['cash_register_id', $cash_register_data->id],
-									['paying_method', 'Cash']
-								])->sum('amount');
-		$data['credit_card_payment'] = Payment::where([
-									['cash_register_id', $cash_register_data->id],
-									['paying_method', 'Credit Card']
-								])->sum('amount');
-		$data['gift_card_payment'] = Payment::where([
-									['cash_register_id', $cash_register_data->id],
-									['paying_method', 'Gift Card']
-								])->sum('amount');
-		$data['deposit_payment'] = Payment::where([
-									['cash_register_id', $cash_register_data->id],
-									['paying_method', 'Deposit']
-								])->sum('amount');
-		$data['cheque_payment'] = Payment::where([
-									['cash_register_id', $cash_register_data->id],
-									['paying_method', 'Cheque']
-								])->sum('amount');
-		$data['paypal_payment'] = Payment::where([
-									['cash_register_id', $cash_register_data->id],
-									['paying_method', 'Paypal']
-								])->sum('amount');
-		$data['total_sale_return'] = Returns::where('cash_register_id', $cash_register_data->id)->sum('grand_total');
-		$data['total_expense'] = Expense::where('cash_register_id', $cash_register_data->id)->sum('amount');
-		$data['total_cash'] = $data['cash_in_hand'] + $data['total_payment'] - ($data['total_sale_return'] + $data['total_expense']);
-		$data['id'] = $cash_register_data->id;
-		return $data;
-	}
-
-	public function close(Request $request)
-	{
-		$cash_register_data = CashRegister::find($request->cash_register_id);
-		$cash_register_data->status = 0;
-		$cash_register_data->save();
-		return redirect()->back()->with('message', 'Cash register closed successfully');
-	}
-
-    public function checkAvailability($warehouse_id)
+    /**
+     * Constructor
+     *
+     * @param  CashRegisterUtil  $cashRegisterUtil
+     * @return void
+     */
+    public function __construct(CashRegisterUtil $cashRegisterUtil, ModuleUtil $moduleUtil)
     {
-    	$open_register_number = CashRegister::where([
-						    		['user_id', Auth::id()],
-						    		['warehouse_id', $warehouse_id],
-						    		['status', true]
-						    	])->count();
-    	if($open_register_number)
-    		return 'true';
-    	else
-    		return 'false';
+        $this->cashRegisterUtil = $cashRegisterUtil;
+        $this->moduleUtil = $moduleUtil;
+    }
+
+    /**
+     * Display a listing of the resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function index()
+    {
+        return view('cash_register.index');
+    }
+
+    /**
+     * Show the form for creating a new resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function create()
+    {
+        //like:repair
+        $sub_type = request()->get('sub_type');
+
+        //Check if there is a open register, if yes then redirect to POS screen.
+        if ($this->cashRegisterUtil->countOpenedRegister() != 0) {
+            return redirect()->action([\App\Http\Controllers\SellPosController::class, 'create'], ['sub_type' => $sub_type]);
+        }
+        $business_id = request()->session()->get('user.business_id');
+        $business_locations = BusinessLocation::forDropdown($business_id);
+
+        return view('cash_register.create')->with(compact('business_locations', 'sub_type'));
+    }
+
+    /**
+     * Store a newly created resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function store(Request $request)
+    {
+        //like:repair
+        $sub_type = request()->get('sub_type');
+
+        try {
+            $initial_amount = 0;
+            if (! empty($request->input('amount'))) {
+                $initial_amount = $this->cashRegisterUtil->num_uf($request->input('amount'));
+            }
+            $user_id = $request->session()->get('user.id');
+            $business_id = $request->session()->get('user.business_id');
+
+            $register = CashRegister::create([
+                'business_id' => $business_id,
+                'user_id' => $user_id,
+                'status' => 'open',
+                'location_id' => $request->input('location_id'),
+                'created_at' => \Carbon::now()->format('Y-m-d H:i:00'),
+            ]);
+            if (! empty($initial_amount)) {
+                $register->cash_register_transactions()->create([
+                    'amount' => $initial_amount,
+                    'pay_method' => 'cash',
+                    'type' => 'credit',
+                    'transaction_type' => 'initial',
+                ]);
+            }
+        } catch (\Exception $e) {
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+        }
+
+        return redirect()->action([\App\Http\Controllers\SellPosController::class, 'create'], ['sub_type' => $sub_type]);
+    }
+
+    /**
+     * Display the specified resource.
+     *
+     * @param  \App\CashRegister  $cashRegister
+     * @return \Illuminate\Http\Response
+     */
+    public function show($id)
+    {
+        if (! auth()->user()->can('view_cash_register')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $business_id = request()->session()->get('user.business_id');
+
+        $register_details = $this->cashRegisterUtil->getRegisterDetails($id);
+        $user_id = $register_details->user_id;
+        $open_time = $register_details['open_time'];
+        $close_time = ! empty($register_details['closed_at']) ? $register_details['closed_at'] : \Carbon::now()->toDateTimeString();
+        $details = $this->cashRegisterUtil->getRegisterTransactionDetails($user_id, $open_time, $close_time);
+
+        $payment_types = $this->cashRegisterUtil->payment_types(null, false, $business_id);
+
+        return view('cash_register.register_details')
+                    ->with(compact('register_details', 'details', 'payment_types', 'close_time'));
+    }
+
+    /**
+     * Shows register details modal.
+     *
+     * @param  void
+     * @return \Illuminate\Http\Response
+     */
+    public function getRegisterDetails()
+    {
+        if (! auth()->user()->can('view_cash_register')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $business_id = request()->session()->get('user.business_id');
+
+        $register_details = $this->cashRegisterUtil->getRegisterDetails();
+
+        $user_id = auth()->user()->id;
+        $open_time = $register_details['open_time'];
+        $close_time = \Carbon::now()->toDateTimeString();
+
+        $is_types_of_service_enabled = $this->moduleUtil->isModuleEnabled('types_of_service');
+
+        $details = $this->cashRegisterUtil->getRegisterTransactionDetails($user_id, $open_time, $close_time, $is_types_of_service_enabled);
+
+        $payment_types = $this->cashRegisterUtil->payment_types($register_details->location_id, true, $business_id);
+
+        return view('cash_register.register_details')
+                ->with(compact('register_details', 'details', 'payment_types', 'close_time'));
+    }
+
+    /**
+     * Shows close register form.
+     *
+     * @param  void
+     * @return \Illuminate\Http\Response
+     */
+    public function getCloseRegister($id = null)
+    {
+        if (! auth()->user()->can('close_cash_register')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $business_id = request()->session()->get('user.business_id');
+        $register_details = $this->cashRegisterUtil->getRegisterDetails($id);
+
+        $user_id = $register_details->user_id;
+        $open_time = $register_details['open_time'];
+        $close_time = \Carbon::now()->toDateTimeString();
+
+        $is_types_of_service_enabled = $this->moduleUtil->isModuleEnabled('types_of_service');
+
+        $details = $this->cashRegisterUtil->getRegisterTransactionDetails($user_id, $open_time, $close_time, $is_types_of_service_enabled);
+
+        $payment_types = $this->cashRegisterUtil->payment_types($register_details->location_id, true, $business_id);
+
+        $pos_settings = ! empty(request()->session()->get('business.pos_settings')) ? json_decode(request()->session()->get('business.pos_settings'), true) : [];
+
+        return view('cash_register.close_register_modal')
+                    ->with(compact('register_details', 'details', 'payment_types', 'pos_settings'));
+    }
+
+    /**
+     * Closes currently opened register.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function postCloseRegister(Request $request)
+    {
+        if (! auth()->user()->can('close_cash_register')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        try {
+            //Disable in demo
+            if (config('app.env') == 'demo') {
+                $output = ['success' => 0,
+                    'msg' => 'Feature disabled in demo!!',
+                ];
+
+                return redirect()->action([\App\Http\Controllers\HomeController::class, 'index'])->with('status', $output);
+            }
+
+            $input = $request->only(['closing_amount', 'total_card_slips', 'total_cheques', 'closing_note']);
+            $input['closing_amount'] = $this->cashRegisterUtil->num_uf($input['closing_amount']);
+            $user_id = $request->input('user_id');
+            $input['closed_at'] = \Carbon::now()->format('Y-m-d H:i:s');
+            $input['status'] = 'close';
+            $input['denominations'] = ! empty(request()->input('denominations')) ? json_encode(request()->input('denominations')) : null;
+
+            CashRegister::where('user_id', $user_id)
+                                ->where('status', 'open')
+                                ->update($input);
+            $output = ['success' => 1,
+                'msg' => __('cash_register.close_success'),
+            ];
+        } catch (\Exception $e) {
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+            $output = ['success' => 0,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+        }
+
+        return redirect()->back()->with('status', $output);
     }
 }

@@ -2,169 +2,211 @@
 
 namespace App\Http\Controllers;
 
+use App\CustomerGroup;
+use App\SellingPriceGroup;
+use App\Utils\Util;
 use Illuminate\Http\Request;
-use App\Models\CustomerGroup;
-use Illuminate\Validation\Rule;
-use Spatie\Permission\Models\Role;
-use Spatie\Permission\Models\Permission;
-use Auth;
-use DB;
-use App\Traits\CacheForget;
+use Yajra\DataTables\Facades\DataTables;
 
 class CustomerGroupController extends Controller
 {
-    use CacheForget;
+    /**
+     * Constructor
+     *
+     * @param  Util  $commonUtil
+     * @return void
+     */
+    public function __construct(Util $commonUtil)
+    {
+        $this->commonUtil = $commonUtil;
+    }
 
+    /**
+     * Display a listing of the resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
     public function index()
     {
-        $role = Role::find(Auth::user()->role_id);
-        if($role->hasPermissionTo('customer_group')) {
-            $lims_customer_group_all = CustomerGroup::where('is_active', true)->get();
-            return view('backend.customer_group.create',compact('lims_customer_group_all'));
+        if (! auth()->user()->can('customer.view')) {
+            abort(403, 'Unauthorized action.');
         }
-        else
-            return redirect()->back()->with('not_permitted', 'Sorry! You are not allowed to access this module');
+
+        if (request()->ajax()) {
+            $business_id = request()->session()->get('user.business_id');
+
+            $customer_group = CustomerGroup::where('customer_groups.business_id', $business_id)
+                                    ->leftjoin('selling_price_groups as spg', 'spg.id', '=', 'customer_groups.selling_price_group_id')
+                                ->select(['customer_groups.name', 'customer_groups.amount', 'spg.name as selling_price_group', 'customer_groups.id', 'price_calculation_type']);
+
+            return Datatables::of($customer_group)
+                    ->addColumn(
+                        'action',
+                        '@can("customer.update")
+                            <button data-href="{{action(\'App\Http\Controllers\CustomerGroupController@edit\', [$id])}}" class="tw-dw-btn tw-dw-btn-xs tw-dw-btn-outline tw-dw-btn-primary tw-m-0.5 edit_customer_group_button"><i class="glyphicon glyphicon-edit"></i> @lang("messages.edit")</button>
+                        &nbsp;
+                        @endcan
+
+                        @can("customer.delete")
+                            <button data-href="{{action(\'App\Http\Controllers\CustomerGroupController@destroy\', [$id])}}" class="tw-dw-btn tw-dw-btn-outline tw-dw-btn-xs tw-dw-btn-error tw-m-0.5 delete_customer_group_button"><i class="glyphicon glyphicon-trash"></i> @lang("messages.delete")</button>
+                        @endcan'
+                    )
+                    ->editColumn('selling_price_group', '@if($price_calculation_type=="selling_price_group") {{$selling_price_group}} @else -- @endif ')
+                    ->editColumn('amount', '@if($price_calculation_type=="percentage") {{$amount}} @else -- @endif ')
+                    ->removeColumn('id')
+                    ->removeColumn('price_calculation_type')
+                    ->rawColumns([3])
+                    ->make(false);
+        }
+
+        return view('customer_group.index');
     }
 
+    /**
+     * Show the form for creating a new resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function create()
+    {
+        if (! auth()->user()->can('customer.create')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $business_id = request()->session()->get('user.business_id');
+        $price_groups = SellingPriceGroup::forDropdown($business_id, false);
+
+        return view('customer_group.create')->with(compact('price_groups'));
+    }
+
+    /**
+     * Store a newly created resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
     public function store(Request $request)
     {
-        $this->validate($request, [
-            'name' => [
-                'max:255',
-                    Rule::unique('customer_groups')->where(function ($query) {
-                    return $query->where('is_active', 1);
-                }),
-            ],
-        ]);
-        $lims_customer_group_data = $request->all();
-        $lims_customer_group_data['is_active'] = true;
-        CustomerGroup::create($lims_customer_group_data);
-        $this->cacheForget('customer_group_list');
-        return redirect('customer_group')->with('message', 'Data inserted successfully');
+        if (! auth()->user()->can('customer.create')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        try {
+            $input = $request->only(['name', 'amount', 'price_calculation_type', 'selling_price_group_id']);
+            $input['business_id'] = $request->session()->get('user.business_id');
+            $input['created_by'] = $request->session()->get('user.id');
+            $input['amount'] = ! empty($input['amount']) ? $this->commonUtil->num_uf($input['amount']) : 0;
+
+            $customer_group = CustomerGroup::create($input);
+            $output = ['success' => true,
+                'data' => $customer_group,
+                'msg' => __('lang_v1.success'),
+            ];
+        } catch (\Exception $e) {
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => false,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+        }
+
+        return $output;
     }
 
+    /**
+     * Show the form for editing the specified resource.
+     *
+     * @param  \App\CustomerGroup  $customerGroup
+     * @return \Illuminate\Http\Response
+     */
     public function edit($id)
     {
-        $lims_customer_group_data = CustomerGroup::find($id);
-        return $lims_customer_group_data;
+        if (! auth()->user()->can('customer.update')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            $business_id = request()->session()->get('user.business_id');
+            $customer_group = CustomerGroup::where('business_id', $business_id)->find($id);
+
+            $business_id = request()->session()->get('user.business_id');
+            $price_groups = SellingPriceGroup::forDropdown($business_id, false);
+
+            return view('customer_group.edit')
+                ->with(compact('customer_group', 'price_groups'));
+        }
     }
 
+    /**
+     * Update the specified resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
     public function update(Request $request, $id)
     {
-        $this->validate($request, [
-            'name' => [
-                'max:255',
-                    Rule::unique('customer_groups')->ignore($request->customer_group_id)->where(function ($query) {
-                    return $query->where('is_active', 1);
-                }),
-            ],
-        ]);
-
-        $input = $request->all();
-        $lims_customer_group_data = CustomerGroup::find($input['customer_group_id']);
-
-        $lims_customer_group_data->update($input);
-        $this->cacheForget('customer_group_list');
-        return redirect('customer_group')->with('message', 'Data updated successfully');
-    }
-
-    public function importCustomerGroup(Request $request)
-    {
-        //get file
-        $upload=$request->file('file');
-        $ext = pathinfo($upload->getClientOriginalName(), PATHINFO_EXTENSION);
-        if($ext != 'csv')
-            return redirect()->back()->with('not_permitted', 'Please upload a CSV file');
-        $filename =  $upload->getClientOriginalName();
-        $upload=$request->file('file');
-        $filePath=$upload->getRealPath();
-        //open and read
-        $file=fopen($filePath, 'r');
-        $header= fgetcsv($file);
-        $escapedHeader=[];
-        //validate
-        foreach ($header as $key => $value) {
-            $lheader=strtolower($value);
-            $escapedItem=preg_replace('/[^a-z]/', '', $lheader);
-            array_push($escapedHeader, $escapedItem);
+        if (! auth()->user()->can('customer.update')) {
+            abort(403, 'Unauthorized action.');
         }
-        //looping through othe columns
-        while($columns=fgetcsv($file))
-        {
-            if($columns[0]=="")
-                continue;
-            foreach ($columns as $key => $value) {
-                $value=preg_replace('/\D/','',$value);
+
+        if (request()->ajax()) {
+            try {
+                $input = $request->only(['name', 'amount', 'price_calculation_type', 'selling_price_group_id']);
+                $business_id = $request->session()->get('user.business_id');
+
+                $input['amount'] = ! empty($input['amount']) ? $this->commonUtil->num_uf($input['amount']) : 0;
+
+                $customer_group = CustomerGroup::where('business_id', $business_id)->findOrFail($id);
+
+                $customer_group->update($input);
+
+                $output = ['success' => true,
+                    'msg' => __('lang_v1.success'),
+                ];
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
             }
-           $data= array_combine($escapedHeader, $columns);
 
-           $customer_group = CustomerGroup::firstOrNew([ 'name'=>$data['name'], 'is_active'=>true ]);
-           $customer_group->name = $data['name'];
-           $customer_group->percentage = $data['percentage'];
-           $customer_group->is_active = true;
-           $customer_group->save();
+            return $output;
         }
-        $this->cacheForget('customer_group_list');
-        return redirect('customer_group')->with('message', 'Customer Group imported successfully');
-
     }
 
-    public function exportCustomerGroup(Request $request)
-    {
-        $lims_customer_group_data = $request['customer_groupArray'];
-        $csvData=array('name, percentage');
-        foreach ($lims_customer_group_data as $customer_group) {
-            if($customer_group > 0) {
-                $data = CustomerGroup::where('id', $customer_group)->first();
-                $csvData[]=$data->name. ',' . $data->percentage;
-            }
-        }
-        $filename="customer_group- " .date('d-m-Y').".csv";
-        $file_path=public_path().'/downloads/'.$filename;
-        $file_url=url('/').'/downloads/'.$filename;
-        $file = fopen($file_path,"w+");
-        foreach ($csvData as $exp_data){
-          fputcsv($file,explode(',',$exp_data));
-        }
-        fclose($file);
-        return $file_url;
-    }
-
-    public function deleteBySelection(Request $request)
-    {
-        $customer_group_id = $request['customer_groupIdArray'];
-        foreach ($customer_group_id as $id) {
-            $lims_customer_group_data = CustomerGroup::find($id);
-            $lims_customer_group_data->is_active = false;
-            $lims_customer_group_data->save();
-        }
-
-        $this->cacheForget('customer_group_list');
-
-        return 'Customer Group deleted successfully!';
-    }
-
+    /**
+     * Remove the specified resource from storage.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
     public function destroy($id)
     {
-        $lims_customer_group_data = CustomerGroup::find($id);
-        $lims_customer_group_data->is_active = false;
-        $lims_customer_group_data->save();
-
-        $this->cacheForget('customer_group_list');
-
-        return redirect('customer_group')->with('not_permitted', 'Data deleted successfully');
-    }
-
-    public function customerGroupAll()
-    {
-        $lims_customer_group_list = DB::table('customer_groups')->where('is_active', true)->get();
-        
-        $html = '';
-        foreach($lims_customer_group_list as $customer_group){
-            $html .='<option value="'.$customer_group->id.'">'.$customer_group->name .'</option>';
+        if (! auth()->user()->can('customer.delete')) {
+            abort(403, 'Unauthorized action.');
         }
 
-        return response()->json($html);
-    }
+        if (request()->ajax()) {
+            try {
+                $business_id = request()->user()->business_id;
 
+                $cg = CustomerGroup::where('business_id', $business_id)->findOrFail($id);
+                $cg->delete();
+
+                $output = ['success' => true,
+                    'msg' => __('lang_v1.success'),
+                ];
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
+            }
+
+            return $output;
+        }
+    }
 }

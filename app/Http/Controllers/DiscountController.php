@@ -2,113 +2,390 @@
 
 namespace App\Http\Controllers;
 
+use App\Brands;
+use App\BusinessLocation;
+use App\Category;
+use App\Discount;
+use App\SellingPriceGroup;
+use App\Utils\Util;
 use Illuminate\Http\Request;
-use App\Models\Discount;
-use App\Models\DiscountPlan;
-use App\Models\Product;
-use App\Models\DiscountPlanDiscount;
-use Spatie\Permission\Models\Role;
-use Auth;
+use Illuminate\Support\Facades\DB;
+use Yajra\DataTables\Facades\DataTables;
 
 class DiscountController extends Controller
 {
+    /**
+     * All Utils instance.
+     */
+    protected $commonUtil;
+
+    /**
+     * Constructor
+     *
+     * @param  ProductUtils  $product
+     * @return void
+     */
+    public function __construct(Util $commonUtil)
+    {
+        $this->commonUtil = $commonUtil;
+    }
+
+    /**
+     * Display a listing of the resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
     public function index()
     {
-        $role = Role::find(Auth::user()->role_id);
-        if($role->hasPermissionTo('discount_plan')) {
-            $lims_discount_all = Discount::with('discountPlans')->orderBy('id', 'desc')->get();
-            return view('backend.discount.index', compact('lims_discount_all'));
+        if (! auth()->user()->can('discount.access')) {
+            abort(403, 'Unauthorized action.');
         }
-        else
-            return redirect()->back()->with('not_permitted', 'Sorry! You are not allowed to access this module');
+
+        if (request()->ajax()) {
+            $business_id = request()->session()->get('user.business_id');
+
+            $discounts = Discount::where('discounts.business_id', $business_id)
+                        ->leftjoin('brands as b', 'discounts.brand_id', '=', 'b.id')
+                        ->leftjoin('categories as c', 'discounts.category_id', '=', 'c.id')
+                        ->leftjoin('business_locations as l', 'discounts.location_id', '=', 'l.id')
+                        ->select(['discounts.id', 'discounts.name', 'starts_at', 'ends_at',
+                            'priority', 'b.name as brand', 'c.name as category', 'l.name as location', 'discounts.is_active', 'discounts.discount_amount', 'discount_type', ])
+                        ->with(['variations', 'variations.product', 'variations.product_variation']);
+
+            return Datatables::of($discounts)
+                ->addColumn(
+                    'action',
+                    '<button data-href="{{action(\'App\Http\Controllers\DiscountController@edit\', [$id])}}" class="tw-dw-btn tw-dw-btn-xs tw-dw-btn-outline tw-dw-btn-primary btn-modal" data-container=".discount_modal"><i class="glyphicon glyphicon-edit"></i> @lang("messages.edit")</button>
+                        &nbsp;
+                        <button data-href="{{action(\'App\Http\Controllers\DiscountController@destroy\', [$id])}}" class="tw-dw-btn tw-dw-btn-outline tw-dw-btn-xs tw-dw-btn-error delete_discount_button"><i class="glyphicon glyphicon-trash"></i> @lang("messages.delete")</button>
+                        @if($is_active != 1)
+                            &nbsp;
+                            <button data-href="{{action(\'App\Http\Controllers\DiscountController@activate\', [$id])}}" class="tw-dw-btn tw-dw-btn-xs tw-dw-btn-outline tw-dw-btn-accent activate-discount"><i class="fa fa-circle-o"></i> @lang("lang_v1.reactivate")</button>
+                        @endif
+                        '
+                )
+                ->addColumn('row_select', function ($row) {
+                    return  '<input type="checkbox" class="row-select" value="'.$row->id.'">';
+                })
+                ->addColumn('products', function ($row) {
+                    $products = [];
+
+                    foreach ($row->variations as $variation) {
+                        $products[] = $variation->full_name;
+                    }
+
+                    return '<span class="label bg-primary">'.implode('</span>, <span class="label bg-primary">', $products).'</span>';
+                })
+                ->editColumn('name', function ($row) {
+                    $name = $row->is_active != 1 ? $row->name.' <span class="label bg-yellow">'.__('lang_v1.inactive').'</sapn>' : $row->name;
+
+                    return $name;
+                })
+                ->editColumn('starts_at', function ($row) {
+                    $starts_at = ! empty($row->starts_at) ? $this->commonUtil->format_date($row->starts_at->toDateTimeString(), true) : '';
+
+                    return $starts_at;
+                })
+                ->editColumn('ends_at', function ($row) {
+                    $ends_at = ! empty($row->ends_at) ? $this->commonUtil->format_date($row->ends_at->toDateTimeString(), true) : '';
+
+                    return $ends_at;
+                })
+                ->editColumn('discount_amount', '{{@num_format($discount_amount)}} @if($discount_type == "percentage") % @endif')
+                ->rawColumns(['name', 'action', 'row_select', 'products'])
+                ->make(true);
+        }
+
+        return view('discount.index');
     }
 
+    /**
+     * Show the form for creating a new resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
     public function create()
     {
-        $lims_discount_plan_list = DiscountPlan::where('is_active', true)->get();
-        return view('backend.discount.create', compact('lims_discount_plan_list'));
+        if (! auth()->user()->can('discount.access')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $business_id = request()->session()->get('user.business_id');
+
+        $categories = Category::where('business_id', $business_id)
+                            ->where('parent_id', 0)
+                            ->pluck('name', 'id');
+
+        $brands = Brands::forDropdown($business_id);
+
+        $locations = BusinessLocation::forDropdown($business_id);
+
+        $price_groups = SellingPriceGroup::forDropdown($business_id);
+
+        return view('discount.create')
+                ->with(compact('categories', 'brands', 'locations', 'price_groups'));
     }
 
-    public function productSearch($code)
-    {
-        $lims_product_data = Product::where([
-            ['code', $code],
-            ['is_active', true]
-        ])->select('id', 'name', 'code')->first();
-
-        $product[] = $lims_product_data->id;
-        $product[] = $lims_product_data->name;
-        $product[] = $lims_product_data->code;
-        return $product;
-    }
-
+    /**
+     * Store a newly created resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
     public function store(Request $request)
     {
-        $data = $request->all();
-        $data['valid_from'] = date('Y-m-d', strtotime($data['valid_from']));
-        $data['valid_till'] = date('Y-m-d', strtotime($data['valid_till']));
-        if(isset($data['product_list'])) {
-            $data['product_list'] = implode(",", $data['product_list']);
+        if (! auth()->user()->can('discount.access')) {
+            abort(403, 'Unauthorized action.');
         }
-        $data['days'] = implode(",", $data['days']);
-        $lims_discount_data = Discount::create($data);
-        foreach ($data['discount_plan_id'] as $key => $discount_plan_id) {
-            DiscountPlanDiscount::create([
-                'discount_id' => $lims_discount_data->id,
-                'discount_plan_id' => $discount_plan_id
-            ]);
+
+        try {
+            $input = $request->only(['name', 'brand_id', 'category_id',
+                'location_id', 'priority', 'discount_type', 'discount_amount', 'spg', ]);
+
+            $business_id = $request->session()->get('user.business_id');
+            $input['business_id'] = $business_id;
+
+            $variation_ids = $request->input('variation_ids');
+
+            if (! empty($variation_ids)) {
+                unset($input['brand_id']);
+                unset($input['category_id']);
+            }
+
+            $input['starts_at'] = $request->has('starts_at') ? $this->commonUtil->uf_date($request->input('starts_at'), true) : null;
+            $input['ends_at'] = $request->has('ends_at') ? $this->commonUtil->uf_date($request->input('ends_at'), true) : null;
+            $checkboxes = ['is_active', 'applicable_in_cg'];
+
+            foreach ($checkboxes as $checkbox) {
+                $input[$checkbox] = $request->has($checkbox) ? 1 : 0;
+            }
+
+            $discount = Discount::create($input);
+
+            if (! empty($variation_ids)) {
+                $discount->variations()->sync($variation_ids);
+            }
+
+            $output = ['success' => true,
+                'msg' => __('lang_v1.added_success'),
+            ];
+        } catch (\Exception $e) {
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => false,
+                'msg' => __('messages.something_went_wrong'),
+            ];
         }
-        return redirect()->route('discounts.index')->with('message', 'Discount created successfully');
+
+        return $output;
     }
 
-    public function show($id)
-    {
-        //
-    }
-
+    /**
+     * Show the form for editing the specified resource.
+     *
+     * @param  \App\Discount  $discount
+     * @return \Illuminate\Http\Response
+     */
     public function edit($id)
     {
-        $lims_discount_data = Discount::find($id);
-        $discount_plan_ids = DiscountPlanDiscount::where('discount_id', $id)->pluck('discount_plan_id')->toArray();
-        $lims_discount_plan_list = DiscountPlan::where('is_active', true)->get();
-        return view('backend.discount.edit', compact('lims_discount_data', 'discount_plan_ids', 'lims_discount_plan_list'));
+        if (! auth()->user()->can('discount.access')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            $business_id = request()->session()->get('user.business_id');
+
+            $discount = Discount::where('business_id', $business_id)
+                            ->with(['variations', 'variations.product', 'variations.product_variation'])
+                            ->find($id);
+
+            $starts_at = $this->commonUtil->format_date($discount->starts_at->toDateTimeString(), true);
+            $ends_at = $this->commonUtil->format_date($discount->ends_at->toDateTimeString(), true);
+
+            $categories = Category::where('business_id', $business_id)
+                            ->where('parent_id', 0)
+                            ->pluck('name', 'id');
+
+            $brands = Brands::forDropdown($business_id);
+
+            $locations = BusinessLocation::forDropdown($business_id);
+
+            $variations = [];
+
+            foreach ($discount->variations as $variation) {
+                $variations[$variation->id] = $variation->full_name;
+            }
+
+            $price_groups = SellingPriceGroup::forDropdown($business_id);
+
+            return view('discount.edit')
+                ->with(compact('discount', 'starts_at', 'ends_at', 'brands', 'categories', 'locations', 'variations', 'price_groups'));
+        }
     }
 
+    /**
+     * Update the specified resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  \App\Discount  $discount
+     * @return \Illuminate\Http\Response
+     */
     public function update(Request $request, $id)
     {
-        $data = $request->all();
-        $lims_discount_data = Discount::find($id);
-        $data['valid_from'] = date('Y-m-d', strtotime(str_replace("/", "-", $data['valid_from'])));
-        $data['valid_till'] = date('Y-m-d', strtotime(str_replace("/", "-", $data['valid_till'])));
-        if(!isset($data['is_active']))
-            $data['is_active'] = 0;
-        if($data['applicable_for'] == 'All')
-            $data['product_list'] = '';
-        elseif(isset($data['product_list']))
-            $data['product_list'] = implode(",", $data['product_list']);
-        $data['days'] = implode(",", $data['days']);
-        $pre_discount_plan_ids = DiscountPlanDiscount::where('discount_id', $id)->pluck('discount_plan_id')->toArray();
-        //deleting previous discount plan id if not exist
-        foreach ($pre_discount_plan_ids as $key => $discount_plan_id) {
-            if(!in_array($discount_plan_id, $data['discount_plan_id'])) {
-                DiscountPlanDiscount::where([
-                    ['discount_plan_id', $discount_plan_id],
-                    ['discount_id', $id]
-                ])->first()->delete();
-            }
+        if (! auth()->user()->can('discount.access')) {
+            abort(403, 'Unauthorized action.');
         }
-        //inserting new discount plan id
-        foreach ($data['discount_plan_id'] as $key => $discount_plan_id) {
-            if(!in_array($discount_plan_id, $pre_discount_plan_ids)) {
-                DiscountPlanDiscount::create(['discount_plan_id' => $id, 'discount_id' => $id]);
+
+        if (request()->ajax()) {
+            try {
+                $input = $request->only(['name', 'brand_id', 'category_id',
+                    'location_id', 'priority', 'discount_type', 'discount_amount', 'spg', ]);
+
+                $business_id = $request->session()->get('user.business_id');
+
+                $input['starts_at'] = $request->has('starts_at') ? $this->commonUtil->uf_date($request->input('starts_at'), true) : null;
+                $input['ends_at'] = $request->has('ends_at') ? $this->commonUtil->uf_date($request->input('ends_at'), true) : null;
+                $checkboxes = ['is_active', 'applicable_in_cg'];
+
+                foreach ($checkboxes as $checkbox) {
+                    $input[$checkbox] = $request->has($checkbox) ? 1 : 0;
+                }
+
+                $variation_ids = $request->input('variation_ids');
+
+                if (! empty($variation_ids)) {
+                    unset($input['brand_id']);
+                    unset($input['category_id']);
+                }
+
+                $discount = Discount::where('business_id', $business_id)
+                            ->find($id);
+
+                $discount->update($input);
+
+                $discount->variations()->sync($variation_ids);
+
+                $output = ['success' => true,
+                    'msg' => __('lang_v1.updated_success'),
+                ];
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
             }
+
+            return $output;
         }
-        $lims_discount_data->update($data);
-        return redirect()->route('discounts.index')->with('message', 'Discount updated successfully');
     }
 
+    /**
+     * Remove the specified resource from storage.
+     *
+     * @param  \App\Discount  $discount
+     * @return \Illuminate\Http\Response
+     */
     public function destroy($id)
     {
-        //
+        if (! auth()->user()->can('discount.access')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            try {
+                $business_id = request()->user()->business_id;
+
+                $discount = Discount::where('business_id', $business_id)->findOrFail($id);
+                $discount->delete();
+
+                $output = ['success' => true,
+                    'msg' => __('lang_v1.deleted_success'),
+                ];
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
+            }
+
+            return $output;
+        }
+    }
+
+    /**
+     * Mass deactivates discounts.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
+    public function massDeactivate(Request $request)
+    {
+        if (! auth()->user()->can('discount.access')) {
+            abort(403, 'Unauthorized action.');
+        }
+        try {
+            if (! empty($request->input('selected_discounts'))) {
+                $business_id = $request->session()->get('user.business_id');
+
+                $selected_discounts = explode(',', $request->input('selected_discounts'));
+
+                DB::beginTransaction();
+
+                Discount::where('business_id', $business_id)
+                            ->whereIn('id', $selected_discounts)
+                            ->update(['is_active' => 0]);
+
+                DB::commit();
+            }
+
+            $output = ['success' => 1,
+                'msg' => __('lang_v1.deactivated_success'),
+            ];
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => 0,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+        }
+
+        return redirect()->back()->with(['status' => $output]);
+    }
+
+    /**
+     * Activates the specified resource from storage.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
+    public function activate($id)
+    {
+        if (! auth()->user()->can('discount.access')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            try {
+                $business_id = request()->session()->get('user.business_id');
+                Discount::where('id', $id)
+                    ->where('business_id', $business_id)
+                    ->update(['is_active' => 1]);
+
+                $output = ['success' => true,
+                    'msg' => __('lang_v1.updated_success'),
+                ];
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
+            }
+
+            return $output;
+        }
     }
 }

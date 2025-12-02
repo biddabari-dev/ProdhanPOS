@@ -2,161 +2,275 @@
 
 namespace App\Http\Controllers;
 
+use App\Product;
+use App\Unit;
+use App\Utils\Util;
 use Illuminate\Http\Request;
-use App\Models\Unit;
-use Illuminate\Validation\Rule;
-use Spatie\Permission\Models\Role;
-use Spatie\Permission\Models\Permission;
-use Auth;
+use Yajra\DataTables\Facades\DataTables;
 
 class UnitController extends Controller
 {
+    /**
+     * All Utils instance.
+     */
+    protected $commonUtil;
+
+    /**
+     * Constructor
+     *
+     * @param  ProductUtils  $product
+     * @return void
+     */
+    public function __construct(Util $commonUtil)
+    {
+        $this->commonUtil = $commonUtil;
+    }
+
+    /**
+     * Display a listing of the resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
     public function index()
     {
-        $role = Role::find(Auth::user()->role_id);
-        if($role->hasPermissionTo('unit')) {
-            $lims_unit_all = Unit::where('is_active', true)->get();
-            return view('backend.unit.create', compact('lims_unit_all'));
+        if (! auth()->user()->can('unit.view') && ! auth()->user()->can('unit.create')) {
+            abort(403, 'Unauthorized action.');
         }
-        else
-            return redirect()->back()->with('not_permitted', 'Sorry! You are not allowed to access this module');
+
+        if (request()->ajax()) {
+            $business_id = request()->session()->get('user.business_id');
+
+            $unit = Unit::where('business_id', $business_id)
+                        ->with(['base_unit'])
+                        ->select(['actual_name', 'short_name', 'allow_decimal', 'id',
+                            'base_unit_id', 'base_unit_multiplier', ]);
+
+            return Datatables::of($unit)
+                ->addColumn(
+                    'action',
+                    '@can("unit.update")
+                    <button data-href="{{action(\'App\Http\Controllers\UnitController@edit\', [$id])}}" class="tw-dw-btn tw-dw-btn-xs tw-dw-btn-outline tw-dw-btn-primary edit_unit_button"><i class="glyphicon glyphicon-edit"></i> @lang("messages.edit")</button>
+                        &nbsp;
+                    @endcan
+                    @can("unit.delete")
+                        <button data-href="{{action(\'App\Http\Controllers\UnitController@destroy\', [$id])}}" class="tw-dw-btn tw-dw-btn-outline tw-dw-btn-xs tw-dw-btn-error delete_unit_button"><i class="glyphicon glyphicon-trash"></i> @lang("messages.delete")</button>
+                    @endcan'
+                )
+                ->editColumn('allow_decimal', function ($row) {
+                    if ($row->allow_decimal) {
+                        return __('messages.yes');
+                    } else {
+                        return __('messages.no');
+                    }
+                })
+                ->editColumn('actual_name', function ($row) {
+                    if (! empty($row->base_unit_id)) {
+                        return  $row->actual_name.' ('.(float) $row->base_unit_multiplier.$row->base_unit->short_name.')';
+                    }
+
+                    return  $row->actual_name;
+                })
+                ->removeColumn('id')
+                ->rawColumns(['action'])
+                ->make(true);
+        }
+
+        return view('unit.index');
     }
 
+    /**
+     * Show the form for creating a new resource.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function create()
+    {
+        if (! auth()->user()->can('unit.create')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $business_id = request()->session()->get('user.business_id');
+
+        $quick_add = false;
+        if (! empty(request()->input('quick_add'))) {
+            $quick_add = true;
+        }
+
+        $units = Unit::forDropdown($business_id);
+
+        return view('unit.create')
+                ->with(compact('quick_add', 'units'));
+    }
+
+    /**
+     * Store a newly created resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @return \Illuminate\Http\Response
+     */
     public function store(Request $request)
     {
-        $this->validate($request, [
-            'unit_code' => [
-                'max:255',
-                    Rule::unique('units')->where(function ($query) {
-                    return $query->where('is_active', 1);
-                }),
-            ],
-
-            'unit_name' => [
-                'max:255',
-                    Rule::unique('units')->where(function ($query) {
-                    return $query->where('is_active', 1);
-                }),
-            ]
-
-        ]);
-        $input = $request->all();
-        $input['is_active'] = true;
-        if(!$input['base_unit']){
-            $input['operator'] = '*';
-            $input['operation_value'] = 1;
+        if (! auth()->user()->can('unit.create')) {
+            abort(403, 'Unauthorized action.');
         }
-        Unit::create($input);
-        return redirect('unit');
+
+        try {
+            $input = $request->only(['actual_name', 'short_name', 'allow_decimal']);
+            $input['business_id'] = $request->session()->get('user.business_id');
+            $input['created_by'] = $request->session()->get('user.id');
+
+            if ($request->has('define_base_unit')) {
+                if (! empty($request->input('base_unit_id')) && ! empty($request->input('base_unit_multiplier'))) {
+                    $base_unit_multiplier = $this->commonUtil->num_uf($request->input('base_unit_multiplier'));
+                    if ($base_unit_multiplier != 0) {
+                        $input['base_unit_id'] = $request->input('base_unit_id');
+                        $input['base_unit_multiplier'] = $base_unit_multiplier;
+                    }
+                }
+            }
+
+            $unit = Unit::create($input);
+            $output = ['success' => true,
+                'data' => $unit,
+                'msg' => __('unit.added_success'),
+            ];
+        } catch (\Exception $e) {
+            \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+            $output = ['success' => false,
+                'msg' => __('messages.something_went_wrong'),
+            ];
+        }
+
+        return $output;
     }
 
-    public function limsUnitSearch()
+    /**
+     * Display the specified resource.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
+    public function show($id)
     {
-        $lims_unit_name = $_GET['lims_unitNameSearch'];
-        $lims_unit_all = Unit::where('unit_name', $lims_unit_name)->paginate(5);
-        $lims_unit_list = Unit::all();
-        return view('backend.unit.create', compact('lims_unit_all','lims_unit_list'));
+        //
     }
 
+    /**
+     * Show the form for editing the specified resource.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
     public function edit($id)
     {
-        $lims_unit_data = Unit::findOrFail($id);
-        return $lims_unit_data;
+        if (! auth()->user()->can('unit.update')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            $business_id = request()->session()->get('user.business_id');
+            $unit = Unit::where('business_id', $business_id)->find($id);
+
+            $units = Unit::forDropdown($business_id);
+
+            return view('unit.edit')
+                ->with(compact('unit', 'units'));
+        }
     }
 
+    /**
+     * Update the specified resource in storage.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
     public function update(Request $request, $id)
     {
-        $this->validate($request, [
-            'unit_code' => [
-                'max:255',
-                    Rule::unique('units')->ignore($request->unit_id)->where(function ($query) {
-                    return $query->where('is_active', 1);
-                }),
-            ],
-            'unit_name' => [
-                'max:255',
-                    Rule::unique('units')->ignore($request->unit_id)->where(function ($query) {
-                    return $query->where('is_active', 1);
-                }),
-            ]
-        ]);
-
-        $input = $request->all();
-        if(!$input['base_unit']){
-            $input['operator'] = '*';
-            $input['operation_value'] = 1;
+        if (! auth()->user()->can('unit.update')) {
+            abort(403, 'Unauthorized action.');
         }
-        $lims_unit_data = Unit::where('id',$input['unit_id'])->first();
-        $lims_unit_data->update($input);
-        return redirect('unit');
-    }
 
-    public function importUnit(Request $request)
-    {
-        //get file
-        $filename =  $request->file->getClientOriginalName();
-        $upload=$request->file('file');
-        $filePath=$upload->getRealPath();
-        //open and read
-        $file=fopen($filePath, 'r');
-        $header= fgetcsv($file);
-        $escapedHeader=[];
-        //validate
-        foreach ($header as $key => $value) {
-            $lheader=strtolower($value);
-            $escapedItem=preg_replace('/[^a-z]/', '', $lheader);
-            array_push($escapedHeader, $escapedItem);
-        }
-        //looping through othe columns
-        $lims_unit_data = [];
-        while($columns=fgetcsv($file))
-        {
-            if($columns[0]=="")
-                continue;
-            foreach ($columns as $key => $value) {
-                $value=preg_replace('/\D/','',$value);
+        if (request()->ajax()) {
+            try {
+                $input = $request->only(['actual_name', 'short_name', 'allow_decimal']);
+                $business_id = $request->session()->get('user.business_id');
+
+                $unit = Unit::where('business_id', $business_id)->findOrFail($id);
+                $unit->actual_name = $input['actual_name'];
+                $unit->short_name = $input['short_name'];
+                $unit->allow_decimal = $input['allow_decimal'];
+                if ($request->has('define_base_unit')) {
+                    if (! empty($request->input('base_unit_id')) && ! empty($request->input('base_unit_multiplier'))) {
+                        $base_unit_multiplier = $this->commonUtil->num_uf($request->input('base_unit_multiplier'));
+                        if ($base_unit_multiplier != 0) {
+                            $unit->base_unit_id = $request->input('base_unit_id');
+                            $unit->base_unit_multiplier = $base_unit_multiplier;
+                        }
+                    }
+                } else {
+                    $unit->base_unit_id = null;
+                    $unit->base_unit_multiplier = null;
+                }
+
+                $unit->save();
+
+                $output = ['success' => true,
+                    'msg' => __('unit.updated_success'),
+                ];
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => __('messages.something_went_wrong'),
+                ];
             }
-            $data= array_combine($escapedHeader, $columns);
 
-            $unit = Unit::firstOrNew(['unit_code' => $data['code'],'is_active' => true ]);
-            $unit->unit_code = $data['code'];
-            $unit->unit_name = $data['name'];
-            if($data['baseunit']==null)
-                $unit->base_unit = null;
-            else{
-                $base_unit = Unit::where('unit_code', $data['baseunit'])->first();
-                $unit->base_unit = $base_unit->id;
-            }
-            if($data['operator'] == null)
-                $unit->operator = '*';
-            else
-                $unit->operator = $data['operator'];
-            if($data['operationvalue'] == null)
-                $unit->operation_value = 1;
-            else
-                $unit->operation_value = $data['operationvalue'];
-            $unit->save();
+            return $output;
         }
-        return redirect('unit')->with('message', 'Unit imported successfully');
-
     }
 
-    public function deleteBySelection(Request $request)
-    {
-        $unit_id = $request['unitIdArray'];
-        foreach ($unit_id as $id) {
-            $lims_unit_data = Unit::findOrFail($id);
-            $lims_unit_data->is_active = false;
-            $lims_unit_data->save();
-        }
-        return 'Unit deleted successfully!';
-    }
-
+    /**
+     * Remove the specified resource from storage.
+     *
+     * @param  int  $id
+     * @return \Illuminate\Http\Response
+     */
     public function destroy($id)
     {
-        $lims_unit_data = Unit::findOrFail($id);
-        $lims_unit_data->is_active = false;
-        $lims_unit_data->save();
-        return redirect('unit');
+        if (! auth()->user()->can('unit.delete')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            try {
+                $business_id = request()->user()->business_id;
+
+                $unit = Unit::where('business_id', $business_id)->findOrFail($id);
+
+                //check if any product associated with the unit
+                $exists = Product::where('unit_id', $unit->id)
+                                ->exists();
+                if (! $exists) {
+                    $unit->delete();
+                    $output = ['success' => true,
+                        'msg' => __('unit.deleted_success'),
+                    ];
+                } else {
+                    $output = ['success' => false,
+                        'msg' => __('lang_v1.unit_cannot_be_deleted'),
+                    ];
+                }
+            } catch (\Exception $e) {
+                \Log::emergency('File:'.$e->getFile().'Line:'.$e->getLine().'Message:'.$e->getMessage());
+
+                $output = ['success' => false,
+                    'msg' => '__("messages.something_went_wrong")',
+                ];
+            }
+
+            return $output;
+        }
     }
 }

@@ -1,94 +1,158 @@
 <?php
 
-
-
 namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
+use App\Providers\RouteServiceProvider;
+use App\Utils\BusinessUtil;
+use App\Utils\ModuleUtil;
 use Illuminate\Foundation\Auth\AuthenticatesUsers;
 use Illuminate\Http\Request;
-use Cache;
-use DB;
+use App\Rules\ReCaptcha;
 
 
 class LoginController extends Controller
-
 {
-
-
+    /*
+    |--------------------------------------------------------------------------
+    | Login Controller
+    |--------------------------------------------------------------------------
+    |
+    | This controller handles authenticating users for the application and
+    | redirecting them to your home screen. The controller uses a trait
+    | to conveniently provide its functionality to your applications.
+    |
+    */
 
     use AuthenticatesUsers;
 
-
-
-    protected $redirectTo = '/dashboard';
+    /**
+     * Where to redirect users after login.
+     *
+     * @var string
+     */
+    protected $redirectTo = RouteServiceProvider::HOME;
 
     /**
-
-     * Create a new controller instance.
-
-     *
-
-     * @return void
-
+     * All Utils instance.
      */
+    protected $businessUtil;
 
-    public function __construct()
+    protected $moduleUtil;
 
+    /**
+     * Create a new controller instance.
+     *
+     * @return void
+     */
+    public function __construct(BusinessUtil $businessUtil, ModuleUtil $moduleUtil)
     {
-
         $this->middleware('guest')->except('logout');
-
+        $this->businessUtil = $businessUtil;
+        $this->moduleUtil = $moduleUtil;
     }
 
     public function showLoginForm()
     {
-        // return DB::table('general_settings')->latest()->first();
-
-        if(isset($_COOKIE['language']))
-            \App::setLocale($_COOKIE['language']);
-        else
-            \App::setLocale('en');
-        //getting theme
-        if(isset($_COOKIE['theme']))
-            $theme = $_COOKIE['theme'];
-        else
-            $theme = 'light';
-        //get general setting value
-        $general_setting =  Cache::remember('general_setting', 60*60*24*365, function () {
-            return DB::table('general_settings')->latest()->first();
-        });
-
-        if(!$general_setting) {
-            \DB::unprepared(file_get_contents(public_path('tenant_necessary.sql')));
-            $general_setting =  Cache::remember('general_setting', 60*60*24*365, function () {
-                return DB::table('general_settings')->latest()->first();
-            });
-            copy(public_path("landlord/images/logo/").$general_setting->site_logo, "logo/".$general_setting->site_logo);
-        }
-        $numberOfUserAccount = \App\Models\User::where('is_active', true)->count();
-        return view('backend.auth.login', compact('theme', 'general_setting', 'numberOfUserAccount'));
+        return view('auth.login');
     }
 
-    public function login(Request $request)
+    /**
+     * Change authentication from email to username
+     *
+     * @return void
+     */
+    public function username()
     {
+        return 'username';
+    }
 
-        $input = $request->all();
+    public function logout()
+    {
+        $this->businessUtil->activityLog(auth()->user(), 'logout');
 
-        $this->validate($request, [
-            'name' => 'required',
-            'password' => 'required',
-        ]);
+        request()->session()->flush();
+        \Auth::logout();
 
-        $fieldType = filter_var($request->name, FILTER_VALIDATE_EMAIL) ? 'email' : 'name';
+        return redirect('/login');
+    }
 
-        if(auth()->attempt(array($fieldType => $input['name'], 'password' => $input['password'])))
-        {
-            setcookie('login_now', 1, time() + (86400 * 1), "/");
-            return redirect('/dashboard');
-        }
-        else {
-            return redirect()->route('login')->with('error','Username And Password Are Wrong.');
+    /**
+     * The user has been authenticated.
+     * Check if the business is active or not.
+     *
+     * @param  \Illuminate\Http\Request  $request
+     * @param  mixed  $user
+     * @return mixed
+     */
+    protected function authenticated(Request $request, $user)
+    {
+        $this->businessUtil->activityLog($user, 'login', null, [], false, $user->business_id);
+
+        if (! $user->business->is_active) {
+            \Auth::logout();
+
+            return redirect('/login')
+              ->with(
+                  'status',
+                  ['success' => 0, 'msg' => __('lang_v1.business_inactive')]
+              );
+        } elseif ($user->status != 'active') {
+            \Auth::logout();
+
+            return redirect('/login')
+              ->with(
+                  'status',
+                  ['success' => 0, 'msg' => __('lang_v1.user_inactive')]
+              );
+        } elseif (! $user->allow_login) {
+            \Auth::logout();
+
+            return redirect('/login')
+                ->with(
+                    'status',
+                    ['success' => 0, 'msg' => __('lang_v1.login_not_allowed')]
+                );
+        } elseif (($user->user_type == 'user_customer') && ! $this->moduleUtil->hasThePermissionInSubscription($user->business_id, 'crm_module')) {
+            \Auth::logout();
+
+            return redirect('/login')
+                ->with(
+                    'status',
+                    ['success' => 0, 'msg' => __('lang_v1.business_dont_have_crm_subscription')]
+                );
         }
     }
+
+    protected function redirectTo()
+    {
+        $user = \Auth::user();
+        if (! $user->can('dashboard.data') && $user->can('sell.create')) {
+            return '/pos/create';
+        }
+
+        if ($user->user_type == 'user_customer') {
+            return 'contact/contact-dashboard';
+        }
+
+        return '/home';
+    }
+
+    public function validateLogin(Request $request)
+    {
+        if(config('constants.enable_recaptcha')){
+            $this->validate($request, [
+                $this->username() => 'required|string',
+                'password' => 'required|string',
+                'g-recaptcha-response' => ['required', new ReCaptcha]
+            ]);
+        }else{
+            $this->validate($request, [
+                $this->username() => 'required|string',
+                'password' => 'required|string',
+            ]);
+        }
+       
+    }
+
 }

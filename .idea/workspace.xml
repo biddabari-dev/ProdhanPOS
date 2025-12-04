@@ -1,7 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ChangeListManager">
-    <list default="true" id="025fc5a5-0733-40b3-94d7-4b283b7e7c35" name="Default Changelist" comment="" />
+    <list default="true" id="025fc5a5-0733-40b3-94d7-4b283b7e7c35" name="Default Changelist" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/Http/Controllers/ProductController.php" beforeDir="false" afterPath="$PROJECT_DIR$/app/Http/Controllers/ProductController.php" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/Http/Controllers/SellReturnController.php" beforeDir="false" afterPath="$PROJECT_DIR$/app/Http/Controllers/SellReturnController.php" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/Utils/TransactionUtil.php" beforeDir="false" afterPath="$PROJECT_DIR$/app/Utils/TransactionUtil.php" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/resources/views/product/index.blade.php" beforeDir="false" afterPath="$PROJECT_DIR$/resources/views/product/index.blade.php" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/resources/views/product/partials/product_list.blade.php" beforeDir="false" afterPath="$PROJECT_DIR$/resources/views/product/partials/product_list.blade.php" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/resources/views/sell_return/add.blade.php" beforeDir="false" afterPath="$PROJECT_DIR$/resources/views/sell_return/add.blade.php" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -251,6 +259,9 @@
       <workItem from="1764489473151" duration="677000" />
       <workItem from="1764575505628" duration="1397000" />
       <workItem from="1764660774753" duration="4877000" />
+      <workItem from="1764678556205" duration="5107000" />
+      <workItem from="1764751066974" duration="6380000" />
+      <workItem from="1764839275111" duration="1004000" />
     </task>
     <servers />
   </component>
@@ -258,9 +269,13 @@
     <option name="version" value="1" />
   </component>
   <component name="WindowStateProjectService">
-    <state x="661" y="344" key="com.intellij.ide.util.TipDialog" timestamp="1764575505811">
+    <state x="709" y="334" key="NewPhpClassDialog" timestamp="1764681244748">
       <screen x="0" y="0" width="1920" height="1040" />
     </state>
-    <state x="661" y="344" key="com.intellij.ide.util.TipDialog/0.0.1920.1040@0.0.1920.1040" timestamp="1764575505811" />
+    <state x="709" y="334" key="NewPhpClassDialog/0.0.1920.1040@0.0.1920.1040" timestamp="1764681244748" />
+    <state x="661" y="344" key="com.intellij.ide.util.TipDialog" timestamp="1764839275294">
+      <screen x="0" y="0" width="1920" height="1040" />
+    </state>
+    <state x="661" y="344" key="com.intellij.ide.util.TipDialog/0.0.1920.1040@0.0.1920.1040" timestamp="1764839275294" />
   </component>
 </project>

@@ -15,6 +15,7 @@ use App\Utils\ProductUtil;
 use App\Utils\TransactionUtil;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Spatie\Activitylog\Models\Activity;
 use Yajra\DataTables\Facades\DataTables;
 
@@ -367,7 +368,7 @@ class SellReturnController extends Controller
      * @param  \Illuminate\Http\Request  $request
      * @return \Illuminate\Http\Response
      */
-    public function store(Request $request)
+    public function oldstore(Request $request)
     {
         if (!auth()->user()->can('access_sell_return') && !auth()->user()->can('access_own_sell_return')) {
             abort(403, 'Unauthorized action.');
@@ -420,12 +421,131 @@ class SellReturnController extends Controller
         return $output;
     }
 
+    public function store(Request $request)
+    {
+        if (!auth()->user()->can('access_sell_return') && !auth()->user()->can('access_own_sell_return')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        try {
+            $input = $request->except('_token');
+
+            if (!empty($input['products'])) {
+                $business_id = $request->session()->get('user.business_id');
+
+                //Check if subscribed or not
+                if (!$this->moduleUtil->isSubscribed($business_id)) {
+                    return $this->moduleUtil->expiredResponse(action([\App\Http\Controllers\SellReturnController::class, 'index']));
+                }
+
+                $user_id = $request->session()->get('user.id');
+
+                DB::beginTransaction();
+
+                $sell_return = $this->transactionUtil->addSellReturn($input, $business_id, $user_id);
+
+                $receipt = $this->receiptContent($business_id, $sell_return->location_id, $sell_return->id);
+
+                // for zatca invoice response
+                $this->moduleUtil->getModuleData('after_sales_return', ['transaction' => $sell_return]);
+
+                DB::commit();
+
+                $output = ['success' => 1,
+                    'msg' => __('lang_v1.success'),
+                    'receipt' => $receipt,
+                ];
+            }
+        } catch (\Exception $e) {
+            DB::rollBack();
+
+            if (get_class($e) == \App\Exceptions\PurchaseSellMismatch::class) {
+                $msg = $e->getMessage();
+            } else {
+                Log::emergency('File:' . $e->getFile() . 'Line:' . $e->getLine() . 'Message:' . $e->getMessage());
+                $msg = __('messages.something_went_wrong');
+            }
+
+            $output = ['success' => 0,
+                'msg' => $msg,
+            ];
+        }
+
+        return $output;
+    }
+
     /**
      * Display the specified resource.
      *
      * @param  int  $id
      * @return \Illuminate\Http\Response
      */
+    public function oldshow($id)
+    {
+        if (!auth()->user()->can('access_sell_return') && !auth()->user()->can('access_own_sell_return')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $business_id = request()->session()->get('user.business_id');
+        $query = Transaction::where('business_id', $business_id)
+            ->where('id', $id)
+            ->with(
+                'contact',
+                'return_parent',
+                'tax',
+                'sell_lines',
+                'sell_lines.product',
+                'sell_lines.variations',
+                'sell_lines.sub_unit',
+                'sell_lines.product',
+                'sell_lines.product.unit',
+                'location'
+            );
+
+        if (!auth()->user()->can('access_sell_return') && auth()->user()->can('access_own_sell_return')) {
+            $sells->where('created_by', request()->session()->get('user.id'));
+        }
+        $sell = $query->first();
+
+        foreach ($sell->sell_lines as $key => $value) {
+            if (!empty($value->sub_unit_id)) {
+                $formated_sell_line = $this->transactionUtil->recalculateSellLineTotals($business_id, $value);
+                $sell->sell_lines[$key] = $formated_sell_line;
+            }
+        }
+
+        $sell_taxes = [];
+        if (!empty($sell->return_parent->tax)) {
+            if ($sell->return_parent->tax->is_tax_group) {
+                $sell_taxes = $this->transactionUtil->sumGroupTaxDetails($this->transactionUtil->groupTaxDetails($sell->return_parent->tax, $sell->return_parent->tax_amount));
+            } else {
+                $sell_taxes[$sell->return_parent->tax->name] = $sell->return_parent->tax_amount;
+            }
+        }
+
+        $total_discount = 0;
+        if ($sell->return_parent->discount_type == 'fixed') {
+            $total_discount = $sell->return_parent->discount_amount;
+        } elseif ($sell->return_parent->discount_type == 'percentage') {
+            $discount_percent = $sell->return_parent->discount_amount;
+            if ($discount_percent == 100) {
+                $total_discount = $sell->return_parent->total_before_tax;
+            } else {
+                $total_after_discount = $sell->return_parent->final_total - $sell->return_parent->tax_amount;
+                $total_before_discount = $total_after_discount * 100 / (100 - $discount_percent);
+                $total_discount = $total_before_discount - $total_after_discount;
+            }
+        }
+
+        $activities = Activity::forSubject($sell->return_parent)
+            ->with(['causer', 'subject'])
+            ->latest()
+            ->get();
+
+        return view('sell_return.show')
+            ->with(compact('sell', 'sell_taxes', 'total_discount', 'activities'));
+    }
+
     public function show($id)
     {
         if (!auth()->user()->can('access_sell_return') && !auth()->user()->can('access_own_sell_return')) {
@@ -492,13 +612,14 @@ class SellReturnController extends Controller
             ->with(compact('sell', 'sell_taxes', 'total_discount', 'activities'));
     }
 
+
     /**
      * Remove the specified resource from storage.
      *
      * @param  int  $id
      * @return \Illuminate\Http\Response
      */
-    public function destroy($id)
+    public function olddestroy($id)
     {
         if (!auth()->user()->can('access_sell_return') && !auth()->user()->can('access_own_sell_return')) {
             abort(403, 'Unauthorized action.');
@@ -560,6 +681,91 @@ class SellReturnController extends Controller
                     $msg = $e->getMessage();
                 } else {
                     \Log::emergency('File:' . $e->getFile() . 'Line:' . $e->getLine() . 'Message:' . $e->getMessage());
+                    $msg = __('messages.something_went_wrong');
+                }
+
+                $output = ['success' => 0,
+                    'msg' => $msg,
+                ];
+            }
+
+            return $output;
+        }
+    }
+
+
+    public function destroy($id)
+    {
+        if (!auth()->user()->can('access_sell_return') && !auth()->user()->can('access_own_sell_return')) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        if (request()->ajax()) {
+            try {
+                $business_id = request()->session()->get('user.business_id');
+                //Begin transaction
+                DB::beginTransaction();
+
+                $query = Transaction::where('id', $id)
+                    ->where('business_id', $business_id)
+                    ->where('type', 'sell_return')
+                    ->with(['sell_lines', 'payment_lines']);
+
+                if (!auth()->user()->can('access_sell_return') && auth()->user()->can('access_own_sell_return')) {
+                    $sells->where('created_by', request()->session()->get('user.id'));
+                }
+                $sell_return = $query->first();
+
+                $sell_lines = TransactionSellLine::where('transaction_id',
+                    $sell_return->return_parent_id)
+                    ->get();
+
+                if (!empty($sell_return)) {
+                    $transaction_payments = $sell_return->payment_lines;
+
+                    foreach ($sell_lines as $sell_line) {
+                        if ($sell_line->quantity_returned > 0 || $sell_line->quantity_returned_good > 0) {
+                            $quantity_good = 0;
+                            $quantity_damage = 0;
+                            $quantity_missing = 0;
+
+                            $quantity_before_good = $this->transactionUtil->num_f($sell_line->quantity_returned_good);
+                            $quantity_before_damage = $this->transactionUtil->num_f($sell_line->quantity_returned_damage);
+                            $quantity_before_missing = $this->transactionUtil->num_f($sell_line->quantity_returned_missing);
+
+                            $total_quantity_before = $quantity_before_good + $quantity_before_damage + $quantity_before_missing;
+
+                            $sell_line->quantity_returned = 0;
+                            $sell_line->quantity_returned_good = 0;
+                            $sell_line->quantity_returned_damage = 0;
+                            $sell_line->quantity_returned_missing = 0;
+                            $sell_line->save();
+
+                            //update quantity sold in corresponding purchase lines
+                            $this->transactionUtil->updateQuantitySoldFromSellLine($sell_line, 0, $total_quantity_before);
+
+                            // Update quantity in variation location details - only good products
+                            $this->productUtil->updateProductQuantity($sell_return->location_id, $sell_line->product_id, $sell_line->variation_id, 0, $quantity_before_good);
+                        }
+                    }
+
+                    $sell_return->delete();
+                    foreach ($transaction_payments as $payment) {
+                        event(new TransactionPaymentDeleted($payment));
+                    }
+                }
+
+                DB::commit();
+                $output = ['success' => 1,
+                    'msg' => __('lang_v1.success'),
+                ];
+            } catch (\Exception $e) {
+                DB::rollBack();
+
+                if (get_class($e) == \App\Exceptions\PurchaseSellMismatch::class) {
+                    $msg = $e->getMessage();
+                } else {
+                    Log::emergency('File:' . $e->getFile() . 'Line:' . $e->getLine() . 'Message:' . $e->getMessage());
                     $msg = __('messages.something_went_wrong');
                 }
 

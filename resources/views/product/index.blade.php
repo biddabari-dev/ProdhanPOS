@@ -302,6 +302,16 @@
                         searchable: false
                     },
                     {
+                        data: 'total_damage',
+                        searchable: false,
+                        orderable: false
+                    },
+                    {
+                        data: 'total_missing',
+                        searchable: false,
+                        orderable: false
+                    },
+                    {
                         data: 'type',
                         name: 'products.type'
                     },
@@ -743,6 +753,8 @@
                         },
                         "footerCallback": function(row, data, start, end, display) {
                             var footer_total_stock = 0;
+                            var footer_total_damage = 0;
+                            var footer_total_missing = 0;
                             var footer_total_sold = 0;
                             var footer_total_transfered = 0;
                             var total_adjusted = 0;
@@ -753,6 +765,11 @@
                             for (var r in data) {
                                 footer_total_stock += $(data[r].stock).data('orig-value') ?
                                     parseFloat($(data[r].stock).data('orig-value')) : 0;
+                                footer_total_damage += $(data[r].total_damage).data('orig-value') ?
+                                    parseFloat($(data[r].total_damage).data('orig-value')) : 0;
+
+                                footer_total_missing += $(data[r].total_missing).data('orig-value') ?
+                                    parseFloat($(data[r].total_missing).data('orig-value')) : 0;
 
                                 footer_total_sold += $(data[r].total_sold).data('orig-value') ?
                                     parseFloat($(data[r].total_sold).data('orig-value')) : 0;
@@ -783,6 +800,8 @@
 
                             $('.footer_total_stock').html(__currency_trans_from_en(footer_total_stock,
                                 false));
+                            $('.footer_total_damage').html(__currency_trans_from_en(footer_total_damage, false));
+                            $('.footer_total_missing').html(__currency_trans_from_en(footer_total_missing, false));
                             $('.footer_total_stock_price').html(__currency_trans_from_en(
                                 total_stock_price));
                             $('.footer_total_sold').html(__currency_trans_from_en(footer_total_sold,

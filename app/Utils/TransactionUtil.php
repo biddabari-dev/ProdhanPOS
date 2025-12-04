@@ -4236,6 +4236,72 @@ class TransactionUtil extends Util
      * @param  decimal  $old_quantity
      * @return void
      */
+    public function oldupdateQuantitySoldFromSellLine($sell_line, $new_quantity, $old_quantity, $uf_number = true)
+    {
+        $new_quantity = $uf_number ? $this->num_uf($new_quantity) : $new_quantity;
+        $old_quantity = $uf_number ? $this->num_uf($old_quantity) : $old_quantity;
+        $qty_difference = $new_quantity - $old_quantity;
+
+        if ($qty_difference != 0) {
+            $qty_left_to_update = $qty_difference;
+            $sell_line_purchase_lines = TransactionSellLinesPurchaseLines::where('sell_line_id', $sell_line->id)->get();
+
+            //Return from each purchase line
+            foreach ($sell_line_purchase_lines as $tslpl) {
+                //If differnce is +ve decrease quantity sold
+                if ($qty_difference > 0) {
+                    if ($tslpl->qty_returned < $tslpl->quantity) {
+                        //Quantity that can be returned from sell line purchase line
+                        $tspl_qty_left_to_return = $tslpl->quantity - $tslpl->qty_returned;
+
+                        $purchase_line = PurchaseLine::find($tslpl->purchase_line_id);
+                        if ($qty_left_to_update <= $tspl_qty_left_to_return) {
+                            if (! empty($purchase_line)) {
+                                $purchase_line->quantity_sold -= $qty_left_to_update;
+                                $purchase_line->save();
+                            }
+
+                            $tslpl->qty_returned += $qty_left_to_update;
+                            $tslpl->save();
+                            break;
+                        } else {
+                            if (! empty($purchase_line)) {
+                                $purchase_line->quantity_sold -= $tspl_qty_left_to_return;
+                                $purchase_line->save();
+                            }
+
+                            $tslpl->qty_returned += $tspl_qty_left_to_return;
+                            $tslpl->save();
+                            $qty_left_to_update -= $tspl_qty_left_to_return;
+                        }
+                    }
+                } //If differnce is -ve increase quantity sold
+                elseif ($qty_difference < 0) {
+                    $purchase_line = PurchaseLine::find($tslpl->purchase_line_id);
+
+                    if (! empty($purchase_line)) {
+                        $tspl_qty_to_return = $tslpl->qty_returned + $qty_left_to_update;
+                        if ($tspl_qty_to_return >= 0) {
+                            $purchase_line->quantity_sold -= $qty_left_to_update;
+                            $purchase_line->save();
+
+                            $tslpl->qty_returned += $qty_left_to_update;
+                            $tslpl->save();
+                            break;
+                        } else {
+                            $purchase_line->quantity_sold += $tslpl->quantity;
+                            $purchase_line->save();
+
+                            $tslpl->qty_returned = 0;
+                            $tslpl->save();
+                            $qty_left_to_update += $tslpl->quantity;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     public function updateQuantitySoldFromSellLine($sell_line, $new_quantity, $old_quantity, $uf_number = true)
     {
         $new_quantity = $uf_number ? $this->num_uf($new_quantity) : $new_quantity;
@@ -4301,6 +4367,7 @@ class TransactionUtil extends Util
             }
         }
     }
+
 
     /**
      * Check if return exist for a particular purchase or sell
@@ -6128,7 +6195,7 @@ class TransactionUtil extends Util
         return $parent_payment;
     }
 
-    public function addSellReturn($input, $business_id, $user_id, $uf_number = true)
+    public function oldaddSellReturn($input, $business_id, $user_id, $uf_number = true)
     {
         $discount = [
             'discount_type' => $input['discount_type'] ?? 'fixed',
@@ -6237,6 +6304,147 @@ class TransactionUtil extends Util
 
                 // Update quantity in variation location details
                 $productUtil->updateProductQuantity($sell_return->location_id, $sell_line->product_id, $sell_line->variation_id, $quantity, $quantity_before, null, false);
+            }
+        }
+
+        return $sell_return;
+    }
+
+    public function addSellReturn($input, $business_id, $user_id)
+    {
+        $discount = [
+            'discount_type' => $input['discount_type'],
+            'discount_amount' => $input['discount_amount'] ?? 0,
+        ];
+
+        $business = Business::with(['currency'])->findOrFail($business_id);
+
+        $productUtil = new ProductUtil();
+
+        $input['tax_id'] = $input['tax_id'] ?? null;
+
+        $invoice_total = $productUtil->calculateInvoiceTotal($input['products'], $input['tax_id'], $discount);
+
+        //Get parent sale
+        $sell = Transaction::where('business_id', $business_id)
+            ->with(['sell_lines', 'sell_lines.sub_unit'])
+            ->findOrFail($input['transaction_id']);
+
+        //Check if any sell return exists for the sale
+        $sell_return = Transaction::where('business_id', $business_id)
+            ->where('type', 'sell_return')
+            ->where('return_parent_id', $sell->id)
+            ->first();
+
+        $sell_return_data = [
+            'invoice_no' => $input['invoice_no'] ?? null,
+            'discount_type' => $discount['discount_type'],
+            'discount_amount' => $this->num_uf($discount['discount_amount']),
+            'tax_id' => $input['tax_id'],
+            'tax_amount' => $invoice_total['tax'],
+            'total_before_tax' => $invoice_total['total_before_tax'],
+            'final_total' => $invoice_total['final_total'],
+        ];
+
+        if (! empty($input['transaction_date'])) {
+            $sell_return_data['transaction_date'] = $this->uf_date($input['transaction_date'], true);
+        }
+
+        //Generate reference number
+        if (empty($sell_return_data['invoice_no']) && empty($sell_return)) {
+            //Update reference count
+            $ref_count = $this->setAndGetReferenceCount('sell_return', $business_id);
+            $sell_return_data['invoice_no'] = $this->generateReferenceNumber('sell_return', $ref_count, $business_id);
+        }
+
+        if (empty($sell_return)) {
+            $sell_return_data['transaction_date'] = $sell_return_data['transaction_date'] ?? \Carbon::now();
+            $sell_return_data['business_id'] = $business_id;
+            $sell_return_data['location_id'] = $sell->location_id;
+            $sell_return_data['contact_id'] = $sell->contact_id;
+            $sell_return_data['customer_group_id'] = $sell->customer_group_id;
+            $sell_return_data['type'] = 'sell_return';
+            $sell_return_data['status'] = 'final';
+            $sell_return_data['created_by'] = $user_id;
+            $sell_return_data['return_parent_id'] = $sell->id;
+            $sell_return = Transaction::create($sell_return_data);
+
+            $this->activityLog($sell_return, 'added');
+        } else {
+            $sell_return_data['invoice_no'] = $sell_return_data['invoice_no'] ?? $sell_return->invoice_no;
+            $sell_return_before = $sell_return->replicate();
+
+            $sell_return->update($sell_return_data);
+
+            $this->activityLog($sell_return, 'edited', $sell_return_before);
+        }
+
+        if ($business->enable_rp == 1 && ! empty($sell->rp_earned)) {
+            $is_reward_expired = $this->isRewardExpired($sell->transaction_date, $business_id);
+            if (! $is_reward_expired) {
+                $diff = $sell->final_total - $sell_return->final_total;
+                $new_reward_point = $this->calculateRewardPoints($business_id, $diff);
+                $this->updateCustomerRewardPoints($sell->contact_id, $new_reward_point, $sell->rp_earned);
+
+                $sell->rp_earned = $new_reward_point;
+                $sell->save();
+            }
+        }
+
+        //Update payment status
+        $this->updatePaymentStatus($sell_return->id, $sell_return->final_total);
+
+        //Update quantity returned in sell line
+        $returns = [];
+        $product_lines = $input['products'];
+        foreach ($product_lines as $product_line) {
+            $returns[$product_line['sell_line_id']] = [
+                'total' => $this->num_uf($product_line['quantity']),
+                'good' => $this->num_uf($product_line['quantity_good'] ?? 0),
+                'damage' => $this->num_uf($product_line['quantity_damage'] ?? 0),
+                'missing' => $this->num_uf($product_line['quantity_missing'] ?? 0),
+            ];
+        }
+
+        foreach ($sell->sell_lines as $sell_line) {
+            if (array_key_exists($sell_line->id, $returns)) {
+                $multiplier = 1;
+                if (! empty($sell_line->sub_unit)) {
+                    $multiplier = $sell_line->sub_unit->base_unit_multiplier;
+                }
+
+                $return_data = $returns[$sell_line->id];
+
+                $total_quantity = $return_data['total'] * $multiplier;
+                $quantity_good = $return_data['good'] * $multiplier;
+                $quantity_damage = $return_data['damage'] * $multiplier;
+                $quantity_missing = $return_data['missing'] * $multiplier;
+
+                // Calculate total quantity for validation
+                $calculated_total = $quantity_good + $quantity_damage + $quantity_missing;
+
+                if ($calculated_total != $total_quantity) {
+                    throw new \Exception('Total quantity does not match sum of good, damage and missing quantities.');
+                }
+
+                $quantity_before_good = $sell_line->quantity_returned_good;
+                $quantity_before_damage = $sell_line->quantity_returned_damage;
+                $quantity_before_missing = $sell_line->quantity_returned_missing;
+
+                $sell_line->quantity_returned = $total_quantity;
+                $sell_line->quantity_returned_good = $quantity_good;
+                $sell_line->quantity_returned_damage = $quantity_damage;
+                $sell_line->quantity_returned_missing = $quantity_missing;
+                $sell_line->save();
+
+                //update quantity sold in corresponding purchase lines
+                $this->updateQuantitySoldFromSellLine($sell_line, $total_quantity,
+                    ($quantity_before_good + $quantity_before_damage + $quantity_before_missing));
+
+                // Update quantity in variation location details - only good products
+                $productUtil->updateProductQuantity($sell_return->location_id,
+                    $sell_line->product_id, $sell_line->variation_id,
+                    $quantity_good, $quantity_before_good);
             }
         }
 

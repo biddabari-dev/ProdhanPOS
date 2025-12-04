@@ -91,6 +91,17 @@ class ProductController extends Controller
                 ->where('products.business_id', $business_id)
                 ->where('products.type', '!=', 'modifier');
 
+
+            // Subquery for damage and missing products
+            $query->leftJoin(DB::raw('(SELECT 
+                tsl.product_id,
+                SUM(COALESCE(tsl.quantity_returned_damage, 0)) as total_damage,
+                SUM(COALESCE(tsl.quantity_returned_missing, 0)) as total_missing
+            FROM transaction_sell_lines tsl
+            WHERE tsl.quantity_returned_damage > 0 OR tsl.quantity_returned_missing > 0
+            GROUP BY tsl.product_id) as return_stats'),
+                            'return_stats.product_id', '=', 'products.id');
+
             if (! empty($location_id) && $location_id != 'none') {
                 if ($permitted_locations == 'all' || in_array($location_id, $permitted_locations)) {
                     $query->whereHas('product_locations', function ($query) use ($location_id) {
@@ -131,6 +142,8 @@ class ProductController extends Controller
                 'products.product_custom_field19', 'products.product_custom_field20',
                 'products.alert_quantity',
                 DB::raw('SUM(vld.qty_available) as current_stock'),
+                DB::raw('COALESCE(return_stats.total_damage, 0) as total_damage'),
+                DB::raw('COALESCE(return_stats.total_missing, 0) as total_missing'),
                 DB::raw('MAX(v.sell_price_inc_tax) as max_price'),
                 DB::raw('MIN(v.sell_price_inc_tax) as min_price'),
                 DB::raw('MAX(v.dpp_inc_tax) as max_purchase_price'),
@@ -284,6 +297,22 @@ class ProductController extends Controller
                         return '--';
                     }
                 })
+                ->editColumn('total_damage', function ($row) {
+                    if ($row->enable_stock) {
+                        $damage = $this->productUtil->num_f($row->total_damage, false, null, true);
+                        return '<span class="text-danger" data-is_quantity="true" data-orig-value="'.$damage.'" data-unit="'.$row->unit.'" >'.$damage.'</span> '.$row->unit;
+                    } else {
+                        return '--';
+                    }
+                })
+                ->editColumn('total_missing', function ($row) {
+                    if ($row->enable_stock) {
+                        $missing = $this->productUtil->num_f($row->total_missing, false, null, true);
+                        return '<span class="text-warning" data-is_quantity="true" data-orig-value="'.$missing.'" data-unit="'.$row->unit.'" >'.$missing.'</span> '.$row->unit;
+                    } else {
+                        return '--';
+                    }
+                })
                 ->addColumn(
                     'purchase_price',
                     '<div style="white-space: nowrap;">@format_currency($min_purchase_price) @if($max_purchase_price != $min_purchase_price && $type == "variable") -  @format_currency($max_purchase_price)@endif </div>'
@@ -306,7 +335,7 @@ class ProductController extends Controller
                             return '';
                         }
                     }, ])
-                ->rawColumns(['action', 'image', 'mass_delete', 'product', 'selling_price', 'purchase_price', 'category', 'current_stock'])
+                ->rawColumns(['action', 'image', 'mass_delete', 'product', 'selling_price', 'purchase_price', 'category', 'current_stock', 'total_damage', 'total_missing'])
                 ->make(true);
         }
 

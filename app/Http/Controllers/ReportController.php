@@ -421,6 +421,25 @@ class ReportController extends Controller
                     }
 
                     return '<span data-is_quantity="true" class="total_adjusted" data-orig-value="'.$total_adjusted.'" data-unit="'.$row->unit.'" >'.$this->transactionUtil->num_f($total_adjusted, false, null, true).'</span> '.$row->unit;
+                })->addColumn('total_damage', function ($row) {
+                    // Fetch damage quantity for this product
+                    $total_damage = DB::table('transaction_sell_lines')
+                        ->where('product_id', $row->product_id)
+                        ->sum('quantity_returned_damage');
+
+                    $total_damage = $total_damage ? (float) $total_damage : 0;
+
+                    return '<span class="text-danger" data-is_quantity="true" class="total_damage" data-orig-value="'.$total_damage.'" data-unit="'.$row->unit.'" >'.$this->transactionUtil->num_f($total_damage, false, null, true).'</span> '.$row->unit;
+                })
+                ->addColumn('total_missing', function ($row) {
+                    // Fetch missing quantity for this product
+                    $total_missing = DB::table('transaction_sell_lines')
+                        ->where('product_id', $row->product_id)
+                        ->sum('quantity_returned_missing');
+
+                    $total_missing = $total_missing ? (float) $total_missing : 0;
+
+                    return '<span class="text-warning" data-is_quantity="true" class="total_missing" data-orig-value="'.$total_missing.'" data-unit="'.$row->unit.'" >'.$this->transactionUtil->num_f($total_missing, false, null, true).'</span> '.$row->unit;
                 })
                 ->editColumn('unit_price', function ($row) use ($allowed_selling_price_group) {
                     $html = '';
@@ -467,7 +486,7 @@ class ReportController extends Controller
                 ->removeColumn('id');
 
             $raw_columns = ['unit_price', 'total_transfered', 'total_sold',
-                'total_adjusted', 'stock', 'stock_price', 'stock_value_by_sale_price',
+                'total_adjusted', 'total_damage', 'total_missing', 'stock', 'stock_price', 'stock_value_by_sale_price',
                 'potential_profit', 'action', ];
 
             if ($show_manufacturing_data) {

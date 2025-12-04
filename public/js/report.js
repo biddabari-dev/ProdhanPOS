@@ -118,6 +118,8 @@ $(document).ready(function() {
         stock_report_cols.push({ data: 'total_sold', name: 'total_sold', searchable: false });
         stock_report_cols.push({ data: 'total_transfered', name: 'total_transfered', searchable: false });
         stock_report_cols.push({ data: 'total_adjusted', name: 'total_adjusted', searchable: false });
+        stock_report_cols.push({ data: 'total_damage', name: 'total_damage', searchable: false });
+        stock_report_cols.push({ data: 'total_missing', name: 'total_missing', searchable: false });
         stock_report_cols.push({ data: 'product_custom_field1', name: 'p.product_custom_field1'});
         stock_report_cols.push({ data: 'product_custom_field2', name: 'p.product_custom_field2'});
         stock_report_cols.push({ data: 'product_custom_field3', name: 'p.product_custom_field3'});
@@ -153,6 +155,8 @@ $(document).ready(function() {
         },
         "footerCallback": function ( row, data, start, end, display ) {
             var footer_total_stock = 0;
+            var footer_total_damage = 0;
+            var footer_total_missing = 0;
             var footer_total_sold = 0;
             var footer_total_transfered = 0;
             var total_adjusted = 0;
@@ -163,6 +167,12 @@ $(document).ready(function() {
             for (var r in data){
                 footer_total_stock += $(data[r].stock).data('orig-value') ? 
                 parseFloat($(data[r].stock).data('orig-value')) : 0;
+
+                footer_total_damage += $(data[r].total_damage).data('orig-value') ?
+                parseFloat($(data[r].total_damage).data('orig-value')) : 0;
+
+                footer_total_missing += $(data[r].total_missing).data('orig-value') ?
+                parseFloat($(data[r].total_missing).data('orig-value')) : 0;
 
                 footer_total_sold += $(data[r].total_sold).data('orig-value') ? 
                 parseFloat($(data[r].total_sold).data('orig-value')) : 0;
@@ -187,6 +197,8 @@ $(document).ready(function() {
             }
 
             $('.footer_total_stock').html(__currency_trans_from_en(footer_total_stock, false));
+            $('.footer_total_damage').html(__currency_trans_from_en(footer_total_damage, false));
+            $('.footer_total_missing').html(__currency_trans_from_en(footer_total_missing, false));
             $('.footer_total_stock_price').html(__currency_trans_from_en(total_stock_price));
             $('.footer_total_sold').html(__currency_trans_from_en(footer_total_sold, false));
             $('.footer_total_transfered').html(__currency_trans_from_en(footer_total_transfered, false));
